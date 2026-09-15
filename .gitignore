@@ -1,0 +1,12 @@
+# System Core Storage Databases
+*.db
+*.db-journal
+
+# Compiled Binaries & Build Cache Artifacts
+bin/
+obj/
+client/bin/
+client/obj/
+
+# Credential Configuration Files (Protects your Discord Token & IBKR Ports)
+AppConfig.json
