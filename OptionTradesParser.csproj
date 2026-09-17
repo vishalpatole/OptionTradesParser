@@ -16,6 +16,12 @@
     <None Include="client\**" />
   </ItemGroup>
 
+  <!-- Parser regression harness: its own entry point, so it must stay out of the app build. -->
+  <ItemGroup>
+    <Compile Remove="_harness\**" />
+    <None Include="_harness\**" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Discord.Net" Version="3.20.1" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />

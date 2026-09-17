@@ -31,10 +31,13 @@ namespace OptionTradesParser
                         Expiration TEXT,
                         ExecutionPrice REAL,
                         RiskCategory TEXT,
+                        AlertTimestamp TEXT,
                         Timestamp TEXT,
                         RawMessage TEXT
                     );";
                 command.ExecuteNonQuery();
+
+                AddColumnIfMissing(command, "TradeAlerts", "AlertTimestamp");
 
                 // 2. 🔥 REFACTORED: Added ClientId, OptionType, Strike and converted to a 5-Column Composite Primary Key
                 command.CommandText = @"
@@ -69,7 +72,19 @@ namespace OptionTradesParser
             }
         }
 
-        public void SaveTrade(ulong messageId, string trader, string action, string ticker, string type, double strike, string expiry, double price, string risk, string raw)
+        /// Every timestamp in this database is UTC ISO-8601 so rows stay comparable regardless of the poster's local zone.
+        private static string UtcStamp(DateTimeOffset moment) => moment.UtcDateTime.ToString("o");
+
+        private static void AddColumnIfMissing(SqliteCommand command, string table, string column)
+        {
+            command.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}';";
+            if (Convert.ToInt64(command.ExecuteScalar() ?? 0L) > 0) return;
+
+            command.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} TEXT;";
+            command.ExecuteNonQuery();
+        }
+
+        public void SaveTrade(ulong messageId, DateTimeOffset alertTime, string trader, string action, string ticker, string type, double strike, string expiry, double price, string risk, string raw)
         {
             try
             {
@@ -78,8 +93,8 @@ namespace OptionTradesParser
                     connection.Open();
                     var command = connection.CreateCommand();
                     command.CommandText = @"
-                        INSERT OR IGNORE INTO TradeAlerts (DiscordMessageId, TraderName, ActionType, Ticker, OptionType, Strike, Expiration, ExecutionPrice, RiskCategory, Timestamp, RawMessage)
-                        VALUES ($msgId, $trader, $action, $ticker, $type, $strike, $expiry, $price, $risk, $time, $raw);";
+                        INSERT OR IGNORE INTO TradeAlerts (DiscordMessageId, TraderName, ActionType, Ticker, OptionType, Strike, Expiration, ExecutionPrice, RiskCategory, AlertTimestamp, Timestamp, RawMessage)
+                        VALUES ($msgId, $trader, $action, $ticker, $type, $strike, $expiry, $price, $risk, $alertTime, $time, $raw);";
                     
                     command.Parameters.AddWithValue("$msgId", (long)messageId);
                     command.Parameters.AddWithValue("$trader", trader);
@@ -90,7 +105,8 @@ namespace OptionTradesParser
                     command.Parameters.AddWithValue("$expiry", expiry);
                     command.Parameters.AddWithValue("$price", price);
                     command.Parameters.AddWithValue("$risk", risk);
-                    command.Parameters.AddWithValue("$time", DateTime.UtcNow.ToString("o"));
+                    command.Parameters.AddWithValue("$alertTime", UtcStamp(alertTime));
+                    command.Parameters.AddWithValue("$time", UtcStamp(DateTimeOffset.UtcNow));
                     command.Parameters.AddWithValue("$raw", raw);
 
                     int rowsAffected = command.ExecuteNonQuery();
@@ -106,6 +122,47 @@ namespace OptionTradesParser
             {
                 Console.WriteLine($"❌ [DB ERROR]: {ex.Message}");
             }
+        }
+
+        public TradeContractContext? FindSingleCurrentEntry(string trader, string ticker)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+                SELECT Ticker, OptionType, Strike, Expiration
+                FROM TradeAlerts
+                WHERE UPPER(TraderName) = UPPER($trader)
+                  AND UPPER(Ticker) = UPPER($ticker)
+                  AND ActionType IN ('BUY', 'AVERAGE_DOWN')
+                  AND Expiration >= $today
+                GROUP BY Ticker, OptionType, Strike, Expiration
+                ORDER BY MAX(COALESCE(AlertTimestamp, Timestamp)) DESC
+                LIMIT 2;";
+            command.Parameters.AddWithValue("$trader", trader);
+            command.Parameters.AddWithValue("$ticker", ticker);
+            command.Parameters.AddWithValue("$today", ExpirationResolver.EasternToday().ToString("yyyyMMdd"));
+
+            using var reader = command.ExecuteReader();
+            TradeContractContext? match = null;
+            int count = 0;
+            while (reader.Read())
+            {
+                count++;
+                if (count == 1)
+                {
+                    match = new TradeContractContext(
+                        reader.GetString(0), reader.GetString(1), reader.GetDouble(2), reader.GetString(3));
+                }
+            }
+
+            if (count > 1)
+            {
+                Console.WriteLine($"⚠️ [PARSER CONTEXT] Multiple current {ticker} contracts found for {trader}; ticker-only exit was not inferred.");
+                return null;
+            }
+
+            return match;
         }
 
         // 🔥 REFACTORED: Now accepts ClientId, OptionType, and Strike to satisfy the unique primary key constraint
@@ -131,7 +188,7 @@ namespace OptionTradesParser
                     command.Parameters.AddWithValue("$action", action);
                     command.Parameters.AddWithValue("$qty", quantity);
                     command.Parameters.AddWithValue("$status", status);
-                    command.Parameters.AddWithValue("$time", DateTime.UtcNow.ToString("o"));
+                    command.Parameters.AddWithValue("$time", UtcStamp(DateTimeOffset.UtcNow));
 
                     command.ExecuteNonQuery();
                     Console.WriteLine($"📝 [OMS TRACKER] Multi-Composite Order Rule Locked: ID #{ibOrderId} | Client {clientId} | {ticker} {strike}{optionType} saved successfully.");
@@ -140,6 +197,28 @@ namespace OptionTradesParser
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ [OMS DB ERROR]: {ex.Message}");
+            }
+        }
+
+        public void UpdateOrderStatus(int ibOrderId, int clientId, string status)
+        {
+            try
+            {
+                using (var connection = new SqliteConnection(_connectionString))
+                {
+                    connection.Open();
+                    var command = connection.CreateCommand();
+                    // Matches on OrderId and ClientId together so parallel API clients cannot cross-update rows.
+                    command.CommandText = "UPDATE ExecutedOrders SET Status = $status WHERE IbOrderId = $id AND ClientId = $clientId;";
+                    command.Parameters.AddWithValue("$status", status);
+                    command.Parameters.AddWithValue("$id", ibOrderId);
+                    command.Parameters.AddWithValue("$clientId", clientId);
+                    command.ExecuteNonQuery();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [ORDER STATUS DB ERROR]: {ex.Message}");
             }
         }
 
@@ -160,7 +239,7 @@ namespace OptionTradesParser
                     command.Parameters.AddWithValue("$step", lifecycleStep);
                     command.Parameters.AddWithValue("$status", status);
                     command.Parameters.AddWithValue("$details", details);
-                    command.Parameters.AddWithValue("$time", DateTime.UtcNow.ToString("o"));
+                    command.Parameters.AddWithValue("$time", UtcStamp(DateTimeOffset.UtcNow));
 
                     command.ExecuteNonQuery();
                 }
@@ -168,29 +247,6 @@ namespace OptionTradesParser
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ [AUDIT LOGGER ERROR]: {ex.Message}");
-            }
-        }
-
-        public bool HasExistingOpenPosition(string ticker)
-        {
-            try
-            {
-                using (var connection = new SqliteConnection(_connectionString))
-                {
-                    connection.Open();
-                    var command = connection.CreateCommand();
-                    command.CommandText = @"
-                        SELECT COUNT(*) FROM ExecutedOrders 
-                        WHERE Ticker = $ticker AND ActionType = 'BUY' AND Status = 'FILLED';";
-                    command.Parameters.AddWithValue("$ticker", ticker);
-                    
-                    long count = (long)(command.ExecuteScalar() ?? 0L);
-                    return count > 0;
-                }
-            }
-            catch
-            {
-                return false; 
             }
         }
     }
