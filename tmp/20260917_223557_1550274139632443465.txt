@@ -1,0 +1,17 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531936082868965439>
+   ├── Forwarded #1 Embed #1: Title="🟢 BUY — IWM 288C · 0DTE" Description="Entered **IWM Sep17 '26 288 Call**
+**⚠️ Super Lotto Trade — Super RISKY**
+[Open Live Dashboard →](https://swiftoptions.pro/desk)"
+   │      Field: Entry = `$0.18`
+   │      Field: Contracts = `25`
+   │      Field: Cost = `$450`
+   │      Field: Trim Targets = ```
+25%   $0.225
+50%   $0.270
+75%   $0.315
+100%  $0.360
+```
+   │      Field: News backdrop = 🔴 Broad Market leaning **down** — 2 up / 9 down in the last 6h

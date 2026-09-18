@@ -1,0 +1,7 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: (empty)
+   ├── Forwarded #1 Embed #1: Title="🚀 +10% — QQQ 710C · Sep 25" Description="**$5.105 → $5.64** · +10.5% (+$53.50/contract)
+**Close or trim & set SL to breakeven.**
+[Open Live Dashboard →](https://swiftoptions.pro/desk)"

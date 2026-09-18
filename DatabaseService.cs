@@ -29,6 +29,7 @@ namespace OptionTradesParser
                         OptionType TEXT,
                         Strike REAL,
                         Expiration TEXT,
+                        ContractSymbol TEXT,
                         ExecutionPrice REAL,
                         RiskCategory TEXT,
                         AlertTimestamp TEXT,
@@ -38,6 +39,7 @@ namespace OptionTradesParser
                 command.ExecuteNonQuery();
 
                 AddColumnIfMissing(command, "TradeAlerts", "AlertTimestamp");
+                AddColumnIfMissing(command, "TradeAlerts", "ContractSymbol");
 
                 // 2. 🔥 REFACTORED: Added ClientId, OptionType, Strike and converted to a 5-Column Composite Primary Key
                 command.CommandText = @"
@@ -48,6 +50,8 @@ namespace OptionTradesParser
                         Ticker TEXT,
                         OptionType TEXT,
                         Strike REAL,
+                        Expiration TEXT,
+                        ContractSymbol TEXT,
                         ActionType TEXT,
                         Quantity INTEGER,
                         Status TEXT,
@@ -56,6 +60,9 @@ namespace OptionTradesParser
                         FOREIGN KEY(DiscordMessageId) REFERENCES TradeAlerts(DiscordMessageId)
                     );";
                 command.ExecuteNonQuery();
+
+                AddColumnIfMissing(command, "ExecutedOrders", "Expiration");
+                AddColumnIfMissing(command, "ExecutedOrders", "ContractSymbol");
 
                 // 3. Central System Audit Log Table
                 command.CommandText = @"
@@ -75,6 +82,11 @@ namespace OptionTradesParser
         /// Every timestamp in this database is UTC ISO-8601 so rows stay comparable regardless of the poster's local zone.
         private static string UtcStamp(DateTimeOffset moment) => moment.UtcDateTime.ToString("o");
 
+        /// Denormalized display/analytics form of a contract, e.g. "INTC 20260917 97C", stored alongside the
+        /// individual Ticker/Expiration/Strike/OptionType columns so reports don't need to reassemble it each time.
+        public static string FormatContractSymbol(string ticker, string expiry, double strike, string optionType)
+            => $"{ticker} {expiry} {strike}{(optionType == "CALL" ? "C" : "P")}";
+
         private static void AddColumnIfMissing(SqliteCommand command, string table, string column)
         {
             command.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}';";
@@ -93,8 +105,8 @@ namespace OptionTradesParser
                     connection.Open();
                     var command = connection.CreateCommand();
                     command.CommandText = @"
-                        INSERT OR IGNORE INTO TradeAlerts (DiscordMessageId, TraderName, ActionType, Ticker, OptionType, Strike, Expiration, ExecutionPrice, RiskCategory, AlertTimestamp, Timestamp, RawMessage)
-                        VALUES ($msgId, $trader, $action, $ticker, $type, $strike, $expiry, $price, $risk, $alertTime, $time, $raw);";
+                        INSERT OR IGNORE INTO TradeAlerts (DiscordMessageId, TraderName, ActionType, Ticker, OptionType, Strike, Expiration, ContractSymbol, ExecutionPrice, RiskCategory, AlertTimestamp, Timestamp, RawMessage)
+                        VALUES ($msgId, $trader, $action, $ticker, $type, $strike, $expiry, $symbol, $price, $risk, $alertTime, $time, $raw);";
                     
                     command.Parameters.AddWithValue("$msgId", (long)messageId);
                     command.Parameters.AddWithValue("$trader", trader);
@@ -103,6 +115,7 @@ namespace OptionTradesParser
                     command.Parameters.AddWithValue("$type", type);
                     command.Parameters.AddWithValue("$strike", strike);
                     command.Parameters.AddWithValue("$expiry", expiry);
+                    command.Parameters.AddWithValue("$symbol", FormatContractSymbol(ticker, expiry, strike, type));
                     command.Parameters.AddWithValue("$price", price);
                     command.Parameters.AddWithValue("$risk", risk);
                     command.Parameters.AddWithValue("$alertTime", UtcStamp(alertTime));
@@ -166,7 +179,7 @@ namespace OptionTradesParser
         }
 
         // 🔥 REFACTORED: Now accepts ClientId, OptionType, and Strike to satisfy the unique primary key constraint
-        public void LogExecutedOrder(int ibOrderId, int clientId, ulong discordMessageId, string ticker, string optionType, double strike, string action, int quantity, string status)
+        public void LogExecutedOrder(int ibOrderId, int clientId, ulong discordMessageId, string ticker, string optionType, double strike, string expiry, string action, int quantity, string status)
         {
             try
             {
@@ -176,8 +189,8 @@ namespace OptionTradesParser
                     var command = connection.CreateCommand();
                     
                     command.CommandText = @"
-                        INSERT OR REPLACE INTO ExecutedOrders (IbOrderId, ClientId, DiscordMessageId, Ticker, OptionType, Strike, ActionType, Quantity, Status, Timestamp)
-                        VALUES ($ibId, $clientId, $discordId, $ticker, $optType, $strike, $action, $qty, $status, $time);";
+                        INSERT OR REPLACE INTO ExecutedOrders (IbOrderId, ClientId, DiscordMessageId, Ticker, OptionType, Strike, Expiration, ContractSymbol, ActionType, Quantity, Status, Timestamp)
+                        VALUES ($ibId, $clientId, $discordId, $ticker, $optType, $strike, $expiry, $symbol, $action, $qty, $status, $time);";
                     
                     command.Parameters.AddWithValue("$ibId", ibOrderId);
                     command.Parameters.AddWithValue("$clientId", clientId);
@@ -185,6 +198,8 @@ namespace OptionTradesParser
                     command.Parameters.AddWithValue("$ticker", ticker);
                     command.Parameters.AddWithValue("$optType", optionType);
                     command.Parameters.AddWithValue("$strike", strike);
+                    command.Parameters.AddWithValue("$expiry", expiry);
+                    command.Parameters.AddWithValue("$symbol", FormatContractSymbol(ticker, expiry, strike, optionType));
                     command.Parameters.AddWithValue("$action", action);
                     command.Parameters.AddWithValue("$qty", quantity);
                     command.Parameters.AddWithValue("$status", status);

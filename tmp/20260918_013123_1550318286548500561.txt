@@ -1,0 +1,16 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531936082868965439>
+   ├── Forwarded #1 Embed #1: Title="🟢 BUY — SPX 7650C · 0DTE" Description="Entered **SPX Sep16 '26 7650 Call**
+**⚠️ Super Lotto Trade — Super RISKY**
+[Open Live Dashboard →](https://swiftoptions.pro/desk)"
+   │      Field: Entry = `$2.325`
+   │      Field: Contracts = `25`
+   │      Field: Cost = `$5,813`
+   │      Field: Trim Targets = ```
+25%   $2.906
+50%   $3.488
+75%   $4.069
+100%  $4.650
+```

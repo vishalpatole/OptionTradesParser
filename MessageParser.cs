@@ -21,6 +21,10 @@ namespace OptionTradesParser
         private static readonly Regex DetachedContractRegex = new(
             $@"(?m)^\s*\d{{1,2}}/\d{{1,2}}(?:/\d{{2,4}})?\s+({Num})\s*([CPcp])\b", Opts);
 
+        // TICKER + STRIKE with no C/P/CALL/PUT stated at all, e.g. "SPY 500 @ 1.20". Anchored to the start of its
+        // own line (unlike ContractRegex) since without a right-hand marker this is far more likely to false-match prose.
+        private static readonly Regex BareContractRegex = new($@"(?m)^\s*\$?([A-Z]{{1,5}})\s+({Num})\b(?!\s*%)", Opts);
+
         private static readonly Regex NamroodHeaderRegex = new(@"Namrood", OptsIc);
         private static readonly Regex SwiftHeaderRegex = new(@"SWIFT TRADES|WIFT TRADES|LIVE DESK|Trim Targets|Locked In|Open Live Dashboard", OptsIc);
         private static readonly Regex HandleTraderRegex = new(@"@((?=[A-Za-z0-9_.\-]*[A-Za-z_])[A-Za-z0-9_.\-]+)", Opts);
@@ -84,6 +88,13 @@ namespace OptionTradesParser
                         optionType = context.OptionType;
                         inferredExpiry = context.Expiration;
                         contractInferred = true;
+                    }
+                    else if (BareContractRegex.Match(content) is { Success: true } bareContract)
+                    {
+                        // No C/P/CALL/PUT stated anywhere: the trader's own convention is that this means a CALL.
+                        ticker = bareContract.Groups[1].Value.ToUpperInvariant();
+                        strike = double.Parse(bareContract.Groups[2].Value, CultureInfo.InvariantCulture);
+                        optionType = "CALL";
                     }
                     else
                     {

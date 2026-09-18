@@ -1,0 +1,4 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: spx 7605C - 2.5 <@&1531933831550992434>

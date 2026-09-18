@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using Discord;
 using Discord.WebSocket;
@@ -72,17 +73,29 @@ namespace OptionTradesParser
             Console.WriteLine($"   ├── From User:  {message.Author.Username}");
             Console.WriteLine("   └── Content Analysis Step Commenced...");
 
-            string content = ExtractDiagnosticText(message, out bool usedForwardedContent);
+            bool isForwarded = message is IUserMessage forwardCheck && forwardCheck.ForwardedMessages.Count > 0;
+            string dump = BuildRawMessageDump(message, isForwarded);
+            string content = BuildParseableText(message);
+
+            // Persisted for every message (not just forwarded) so a correct-looking parse can still be audited later.
+            RawMessageDumpWriter.Save(message.Id, message.Timestamp, dump);
+
+            Console.ForegroundColor = ConsoleColor.DarkCyan;
+            Console.Write(dump);
+            Console.WriteLine("   ├── Parseable Text: " + content.Replace("\n", " ↵ "));
+            Console.ResetColor();
 
             var result = _parser.TryParse(content, _dbService.FindSingleCurrentEntry);
 
             if (result != null)
             {
-                string optionCode = result.OptionType == "CALL" ? "C" : "P";
                 Console.WriteLine("✅ [PARSED TRADE]");
                 Console.WriteLine($"   ├── Trader:   {result.TraderName}");
                 Console.WriteLine($"   ├── Action:   {result.ActionType}{(result.SizingAmbiguous ? " (size requires confirmation)" : string.Empty)}");
-                Console.WriteLine($"   ├── Contract: {result.Ticker} {result.Expiration} {result.Strike}{optionCode}{(result.ContractInferred ? " (inferred from prior alert)" : string.Empty)}");
+                Console.WriteLine($"   ├── Ticker:   {result.Ticker}{(result.ContractInferred ? " (inferred from prior alert)" : string.Empty)}");
+                Console.WriteLine($"   ├── Type:     {result.OptionType}");
+                Console.WriteLine($"   ├── Strike:   {result.Strike}");
+                Console.WriteLine($"   ├── Expiry:   {result.Expiration}");
                 Console.WriteLine($"   ├── Price:    ${result.PricePaid:F2}");
                 Console.WriteLine($"   └── Risk:     {result.RiskCategory}");
 
@@ -92,11 +105,15 @@ namespace OptionTradesParser
 
                 // Keep IBKR validation and confirmation off the Discord event thread.
                 _ = Task.Run(() => _executionService.ProcessIncomingAlert(message.Id, result));
+
+                Console.WriteLine("🔎 [PARSER DIAGNOSTICS] Cross-check against the fields above — flag it if anything here looks off:");
+                foreach (var line in MessageParser.Diagnose(content).Split('\n'))
+                    Console.WriteLine($"   │ {line}");
+                Console.WriteLine();
             }
             else
             {
                 Console.WriteLine("❌ [PIPELINE OUTPUT] Message marked as UNHANDLED or CHATTER.");
-                DumpRawMessage(message, usedForwardedContent);
                 Console.WriteLine("🔎 [PARSER DIAGNOSTICS] Best-effort read of whatever the parser could still find:");
                 foreach (var line in MessageParser.Diagnose(content).Split('\n'))
                     Console.WriteLine($"   │ {line}");
@@ -106,28 +123,48 @@ namespace OptionTradesParser
             await Task.CompletedTask;
         }
 
-        /// Forwarded Discord messages arrive with an empty Content; the real text lives in ForwardedMessages instead.
-        private static string ExtractDiagnosticText(SocketMessage message, out bool usedForwardedContent)
+        /// Builds the text actually handed to the parser: Content plus every embed's title, description and
+        /// fields, for both the message itself and any forwarded snapshot. Forwarded alerts carry the trade
+        /// details in the embed, not in Content, so skipping embeds here would leave the parser with nothing.
+        private static string BuildParseableText(SocketMessage message)
         {
-            usedForwardedContent = false;
-            if (!string.IsNullOrWhiteSpace(message.Content)) return message.Content;
+            var parts = new List<string>();
 
-            if (message is IUserMessage userMessage && userMessage.ForwardedMessages.Count > 0)
+            if (!string.IsNullOrWhiteSpace(message.Content)) parts.Add(message.Content);
+            AppendEmbedText(parts, message.Embeds);
+
+            if (message is IUserMessage userMessage)
             {
-                usedForwardedContent = true;
-                return string.Join("\n\n", userMessage.ForwardedMessages.Select(s => s.Message.Content));
+                foreach (var snapshot in userMessage.ForwardedMessages)
+                {
+                    if (!string.IsNullOrWhiteSpace(snapshot.Message.Content)) parts.Add(snapshot.Message.Content);
+                    AppendEmbedText(parts, snapshot.Message.Embeds);
+                }
             }
 
-            return message.Content;
+            return string.Join("\n", parts);
         }
 
-        /// Prints everything Discord actually delivered so a failed parse can be diagnosed from the console alone.
-        private static void DumpRawMessage(SocketMessage message, bool usedForwardedContent)
+        private static void AppendEmbedText(List<string> parts, IReadOnlyCollection<IEmbed> embeds)
         {
-            Console.ForegroundColor = ConsoleColor.DarkCyan;
-            Console.WriteLine("📄 [RAW MESSAGE DUMP]");
-            Console.WriteLine($"   ├── Type:        {message.Type}{(usedForwardedContent ? " (forwarded)" : string.Empty)}");
-            Console.WriteLine($"   ├── Content:     {(string.IsNullOrWhiteSpace(message.Content) ? "(empty)" : message.Content)}");
+            foreach (var embed in embeds)
+            {
+                if (!string.IsNullOrWhiteSpace(embed.Title)) parts.Add(embed.Title);
+                if (!string.IsNullOrWhiteSpace(embed.Description)) parts.Add(embed.Description);
+
+                // "Name: Value" so the price/date regexes (which expect a colon or dash after a label) still match.
+                foreach (var field in embed.Fields)
+                    parts.Add($"{field.Name}: {field.Value}");
+            }
+        }
+
+        /// Builds a text report of everything Discord actually delivered, for console display and disk persistence.
+        private static string BuildRawMessageDump(SocketMessage message, bool isForwarded)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("📄 [RAW MESSAGE DUMP]");
+            sb.AppendLine($"   ├── Type:        {message.Type}{(isForwarded ? " (forwarded)" : string.Empty)}");
+            sb.AppendLine($"   ├── Content:     {(string.IsNullOrWhiteSpace(message.Content) ? "(empty)" : message.Content)}");
 
             if (message is IUserMessage userMessage && userMessage.ForwardedMessages.Count > 0)
             {
@@ -135,28 +172,28 @@ namespace OptionTradesParser
                 foreach (var snapshot in userMessage.ForwardedMessages)
                 {
                     i++;
-                    Console.WriteLine($"   ├── Forwarded #{i} Content: {(string.IsNullOrWhiteSpace(snapshot.Message.Content) ? "(empty)" : snapshot.Message.Content)}");
-                    DumpEmbedsAndAttachments(snapshot.Message.Embeds, snapshot.Message.Attachments, $"Forwarded #{i} ");
+                    sb.AppendLine($"   ├── Forwarded #{i} Content: {(string.IsNullOrWhiteSpace(snapshot.Message.Content) ? "(empty)" : snapshot.Message.Content)}");
+                    AppendEmbedsAndAttachments(sb, snapshot.Message.Embeds, snapshot.Message.Attachments, $"Forwarded #{i} ");
                 }
             }
 
-            DumpEmbedsAndAttachments(message.Embeds, message.Attachments, string.Empty);
-            Console.ResetColor();
+            AppendEmbedsAndAttachments(sb, message.Embeds, message.Attachments, string.Empty);
+            return sb.ToString();
         }
 
-        private static void DumpEmbedsAndAttachments(IReadOnlyCollection<IEmbed> embeds, IReadOnlyCollection<IAttachment> attachments, string label)
+        private static void AppendEmbedsAndAttachments(StringBuilder sb, IReadOnlyCollection<IEmbed> embeds, IReadOnlyCollection<IAttachment> attachments, string label)
         {
             int i = 0;
             foreach (var embed in embeds)
             {
                 i++;
-                Console.WriteLine($"   ├── {label}Embed #{i}: Title=\"{embed.Title}\" Description=\"{embed.Description}\"");
+                sb.AppendLine($"   ├── {label}Embed #{i}: Title=\"{embed.Title}\" Description=\"{embed.Description}\"");
                 foreach (var field in embed.Fields)
-                    Console.WriteLine($"   │      Field: {field.Name} = {field.Value}");
+                    sb.AppendLine($"   │      Field: {field.Name} = {field.Value}");
             }
 
             foreach (var attachment in attachments)
-                Console.WriteLine($"   ├── {label}Attachment: {attachment.Filename} ({attachment.Url})");
+                sb.AppendLine($"   ├── {label}Attachment: {attachment.Filename} ({attachment.Url})");
         }
     }
 }

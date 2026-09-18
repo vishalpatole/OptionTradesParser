@@ -1,0 +1,6 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531933581813878844>
+   ├── Forwarded #1 Embed #1: Title="Idea" Description="0.68->1.26  INTC - TRIM AND SET SL ON RUNNERS - GOT BACK NVDA LOSS
+[@Namrood](https://discord.gg/m9WAsJdFrn) -  [Live trades dashboard](https://dashboard.prismagroup.online/)"

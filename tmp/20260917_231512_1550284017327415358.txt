@@ -1,0 +1,10 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531933581813878844>
+   ├── Forwarded #1 Embed #1: Title="Buy To Open" Description="Small Plz
+
+```ansi
+[1;37;44mBAC 62C  9/18/2026 $1.12[0m
+```
+[@Namrood](https://www.prismagroup.online/)  -  [LIVE DASHBOARD](https://dashboard.prismagroup.online/)"

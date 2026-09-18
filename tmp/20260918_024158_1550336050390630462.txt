@@ -1,0 +1,15 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531936405561938033>
+   ├── Forwarded #1 Embed #1: Title="🟢 BUY — NBIG 16C · Sep 18" Description="Entered **NBIG Sep18 '26 16 Call**
+[Open Live Dashboard →](https://swiftoptions.pro/desk)"
+   │      Field: Entry = `$0.43`
+   │      Field: Contracts = `1`
+   │      Field: Cost = `$43`
+   │      Field: Trim Targets = ```
+25%   $0.538
+50%   $0.645
+75%   $0.753
+100%  $0.860
+```

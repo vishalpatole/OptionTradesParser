@@ -23,8 +23,10 @@ namespace OptionTradesParser
             // IBKR API Parsing Coordinates
             string ibHost = config["IBKRSettings:Host"] ?? "127.0.0.1";
             int ibPort = int.Parse(config["IBKRSettings:Port"] ?? "7497");
-            int ibClientId = int.Parse(config["IBKRSettings:ClientId"] ?? "1");
+            // Randomized for now (range 20-111) to dodge stale-connection clientId clashes on TWS.
+            int ibClientId = Random.Shared.Next(20, 112);
             int ibQty = int.Parse(config["IBKRSettings:DefaultQuantity"] ?? "5");
+            Console.WriteLine($"🎲 [IBKR] Using random ClientId: {ibClientId}");
 
             if (!ulong.TryParse(rawChannelId, out ulong targetChannelId) || string.IsNullOrEmpty(botToken) || botToken == "YOUR_ACTUAL_BOT_TOKEN_HERE" || targetChannelId == 0)
             {
@@ -44,6 +46,11 @@ namespace OptionTradesParser
 
             // Pass execution service back over to map relational constraints cleanly
             executionService.SetDatabaseService(databaseService);
+
+            // Ctrl+C, window close, or an unhandled crash should still log the TWS session off cleanly,
+            // otherwise it lingers as a ghost session that can contribute to future connection resets.
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => executionService.Disconnect();
+            Console.CancelKeyPress += (_, _) => executionService.Disconnect();
 
             // 4. Initialize & Start the Connection Listener Engine (Passing exactly 5 parameters)
             var botService = new DiscordBotService(botToken, targetChannelId, parser, databaseService, executionService);

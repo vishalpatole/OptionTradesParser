@@ -1,0 +1,4 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: Lotto Light size 760P @ 23 <@&1540603925361852496>

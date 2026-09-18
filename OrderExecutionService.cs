@@ -8,8 +8,11 @@ namespace OptionTradesParser
     public class OrderExecutionService : DefaultEWrapper
     {
         private static readonly TimeSpan BrokerReplyTimeout = TimeSpan.FromSeconds(10);
-        private static readonly TimeSpan ReconnectDelay = TimeSpan.FromMinutes(2);
-        private const int MaxReconnectAttempts = 3;
+
+        // Escalating backoff: TWS often just needs a few seconds after a forced close before it accepts again,
+        // but a restart can take minutes, so later attempts wait longer.
+        private static readonly TimeSpan[] ReconnectDelays =
+            { TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(2) };
 
         // The quote is advisory only, so it must never delay a time-sensitive confirmation prompt for long.
         private static readonly TimeSpan QuoteTimeout = TimeSpan.FromSeconds(3);
@@ -28,6 +31,7 @@ namespace OptionTradesParser
         private readonly ContractRequestBook _contractRequests = new();
         private readonly PositionBook _positions = new();
         private readonly QuoteBook _quotes = new();
+        private Thread? _readerThread;
 
         // Serializes the console confirmation prompt so concurrent alerts cannot steal each other's keystrokes.
         private readonly object _promptGate = new();
@@ -41,11 +45,27 @@ namespace OptionTradesParser
             _clientId = clientId;
             _defaultQty = defaultQty;
 
-            Connect();
+            // "Connection refused" at startup usually means TWS hasn't finished its own boot/login yet
+            // (this is routine right after TWS's nightly restart), so the first attempt gets retried too.
+            if (!Connect() && Interlocked.CompareExchange(ref _reconnectLoopActive, 1, 0) == 0)
+            {
+                _ = ReconnectAsync();
+            }
         }
 
         private bool Connect()
         {
+            // TWS can force-close a socket that still looks "connected" to this client; disconnecting first
+            // guarantees a clean slate instead of retrying eConnect against stale internal state.
+            if (_clientSocket.IsConnected()) _clientSocket.eDisconnect();
+
+            // Two reader threads racing on the same shared signal (old + new generation) can desync the
+            // protocol stream and looks exactly like TWS forcibly resetting the connection. Only one may run.
+            if (_readerThread is { IsAlive: true } stale && !stale.Join(TimeSpan.FromSeconds(2)))
+            {
+                Console.WriteLine("⚠️ [IBKR] Previous reader thread did not exit in time; proceeding anyway.");
+            }
+
             _orderIdReady.Reset();
             Console.WriteLine($"🔌 [IBKR] Connecting to TWS Gateway at {_host}:{_port}...");
             _clientSocket.eConnect(_host, _port, _clientId);
@@ -56,12 +76,14 @@ namespace OptionTradesParser
 
                 var reader = new EReader(_clientSocket, _readerSignal);
                 reader.Start();
-                new Thread(() => {
+                var thread = new Thread(() => {
                     while (_clientSocket.IsConnected()) {
                         _readerSignal.waitForSignal();
                         reader.processMsgs();
                     }
-                }) { IsBackground = true }.Start();
+                }) { IsBackground = true };
+                _readerThread = thread;
+                thread.Start();
 
                 // Falls back to delayed quotes when the account has no live option data subscription.
                 _clientSocket.reqMarketDataType(4);
@@ -77,6 +99,13 @@ namespace OptionTradesParser
         public void SetDatabaseService(DatabaseService dbService)
         {
             _dbService = dbService;
+        }
+
+        /// Cleanly logs off the TWS API session; call on process exit so a crashed/killed run doesn't leave a
+        /// ghost session that can count against TWS's connected-client limit and cause future connects to reset.
+        public void Disconnect()
+        {
+            if (_clientSocket.IsConnected()) _clientSocket.eDisconnect();
         }
 
         public override void nextValidId(int orderId)
@@ -138,25 +167,28 @@ namespace OptionTradesParser
 
         private async System.Threading.Tasks.Task ReconnectAsync()
         {
+            int maxAttempts = ReconnectDelays.Length;
             try
             {
-                for (int attempt = 1; attempt <= MaxReconnectAttempts; attempt++)
+                for (int attempt = 1; attempt <= maxAttempts; attempt++)
                 {
-                    Console.WriteLine($"🔄 [IBKR] Reconnect attempt {attempt}/{MaxReconnectAttempts} starts in {ReconnectDelay.TotalMinutes:0} minutes.");
-                    await System.Threading.Tasks.Task.Delay(ReconnectDelay);
+                    TimeSpan delay = ReconnectDelays[attempt - 1];
+                    Console.WriteLine($"🔄 [IBKR] Reconnect attempt {attempt}/{maxAttempts} starts in {delay.TotalSeconds:0}s.");
+                    await System.Threading.Tasks.Task.Delay(delay);
 
                     bool socketOpened = Connect();
                     bool handshakeCompleted = socketOpened && _orderIdReady.Wait(BrokerReplyTimeout);
                     if (handshakeCompleted && _clientSocket.IsConnected())
                     {
-                        Console.WriteLine($"✅ [IBKR] Reconnected on attempt {attempt}/{MaxReconnectAttempts}.");
+                        Console.WriteLine($"✅ [IBKR] Reconnected on attempt {attempt}/{maxAttempts}.");
                         return;
                     }
 
-                    Console.WriteLine($"❌ [IBKR] Reconnect attempt {attempt}/{MaxReconnectAttempts} did not complete the broker handshake.");
+                    Console.WriteLine($"❌ [IBKR] Reconnect attempt {attempt}/{maxAttempts} did not complete the broker handshake.");
                 }
 
-                Console.WriteLine($"❌ [IBKR] Reconnect stopped after {MaxReconnectAttempts} unsuccessful attempts.");
+                Console.WriteLine($"❌ [IBKR] Reconnect stopped after {maxAttempts} unsuccessful attempts. If TWS just restarted, open");
+                Console.WriteLine("   Global Configuration → API → Settings and click Apply once, then restart this app.");
             }
             finally
             {
@@ -332,19 +364,29 @@ namespace OptionTradesParser
 
             Console.WriteLine("⏳ Awaiting confirmation in the pop-up dialog...");
 
-            string dialogBody =
-                $"Trader:\t{trade.TraderName}\r\nAction:\t{action}\r\n\r\n" +
-                $"Parsed Alert:\t{trade.Ticker} {trade.Expiration} {trade.Strike}{(trade.OptionType == "CALL" ? "C" : "P")} @ ${trade.PricePaid:F2}\r\n" +
-                (trade.ContractInferred ? "Source:\tPrior matching trader alert (contract inferred)\r\n" : string.Empty) +
-                $"Risk:\t\t{trade.RiskCategory}\r\n\r\n" +
-                $"Contract:\t{contract.LocalSymbol}\r\n\t\t(conId {contract.ConId}, {contract.TradingClass} @ {contract.Exchange})\r\n\r\n" +
-                $"Market:\t{DescribeQuote(quote)}\r\n\r\n" +
-                $"ORDER:\t{orderAction} {orderQty} @ LMT ${limitPrice}\r\n\r\n" +
-                (sizingWarning != null ? $"⚠ {sizingWarning}\r\n\r\n" : string.Empty) +
-                (marketabilityWarning != null ? $"⚠ {marketabilityWarning}\r\n\r\n" : string.Empty) +
-                "Execute this order on your IBKR account?";
+            var warnings = new System.Collections.Generic.List<string>();
+            if (sizingWarning != null) warnings.Add(sizingWarning);
+            if (marketabilityWarning != null) warnings.Add(marketabilityWarning);
+            if (trade.ContractInferred) warnings.Add("Source: prior matching trader alert (contract inferred, not stated in this message).");
 
-            bool approved = ConfirmationDialog.Confirm($"Pre-Trade Confirmation - {orderAction} {ticker}", dialogBody);
+            var details = new TradeConfirmationDetails(
+                Trader: trade.TraderName,
+                Intent: action,
+                OrderAction: orderAction,
+                Ticker: trade.Ticker,
+                OptionType: trade.OptionType,
+                Strike: trade.Strike,
+                Expiry: trade.Expiration,
+                Quantity: orderQty,
+                OrderType: "LMT",
+                LimitPrice: limitPrice,
+                MarketQuote: DescribeQuote(quote),
+                ContractSymbol: $"{contract.LocalSymbol} (conId {contract.ConId}, {contract.TradingClass} @ {contract.Exchange})",
+                RiskCategory: trade.RiskCategory,
+                ContractInferred: trade.ContractInferred,
+                Warnings: warnings);
+
+            bool approved = ConfirmationDialog.Confirm(details);
 
             if (approved)
             {
@@ -466,7 +508,7 @@ namespace OptionTradesParser
             Console.WriteLine($"   └── Submitted: {orderAction} {orderQty}x {contract.LocalSymbol} @ LMT ${limitPrice:F2}\n");
 
             // 🔥 UPDATED: Passes ClientId, type, and strike into the unique logging function
-            _dbService?.LogExecutedOrder(orderId, _clientId, _activeDiscordMessageId, trade.Ticker, trade.OptionType, trade.Strike, orderAction, orderQty, "SUBMITTED");
+            _dbService?.LogExecutedOrder(orderId, _clientId, _activeDiscordMessageId, trade.Ticker, trade.OptionType, trade.Strike, trade.Expiration, orderAction, orderQty, "SUBMITTED");
             _dbService?.LogAudit(_activeDiscordMessageId, trade.Ticker, "EXCHANGE_ROUTING", "SUBMITTED", $"Order ID #{orderId} successfully dispatched onto the market exchange.");
         }
 

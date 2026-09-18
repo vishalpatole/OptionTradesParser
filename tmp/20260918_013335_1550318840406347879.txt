@@ -1,0 +1,12 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531933581813878844>
+   ├── Forwarded #1 Embed #1: Title="⚠️ Lotto Trade — RISKY" Description="ZERO OR HERO - FOMC LOTTO
+
+```SPY 765C 0DTE 0.58```
+⚠️ Size for what you can afford to lose --- 1% of your account balance.
+
+Manage your risk!
+
+[@Namrood](https://www.prismagroup.online/)  -  [LIVE DASHBOARD](https://dashboard.prismagroup.online/)"

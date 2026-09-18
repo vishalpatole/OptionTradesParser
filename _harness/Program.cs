@@ -85,6 +85,8 @@ SPY here
 Avg. 2.15
 **STAY LIGHT**"),
 ("OPEN-9 SWIFT IWM", "$IWM 288 CALL @.32 \n@Swift"),
+("OPEN-10 NAMROOD BAC (ansi)", "Buy To Open\nSmall Plz\n\n```ansi\n\u001b[0;33mBAC\u001b[0m \u001b[0;36m62C\u001b[0m  9/18/2026 $1.12\n```\n[@Namrood](https://www.prismagroup.online/)  -  [LIVE DASHBOARD](https://dashboard.prismagroup.online/)"),
+("OPEN-11 NAMROOD INTC (inline)", "<@&1531933581813878844>\n\u26a0\ufe0f Lotto Trade \u2014 RISKY\n```INTC 97C 0DTE 0.9```\n\u26a0\ufe0f Size for what you can afford to lose --- 1% of your account balance.\n\nManage your risk!\n\n[@Namrood](https://www.prismagroup.online/)  -  [LIVE DASHBOARD](https://dashboard.prismagroup.online/)"),
 ("UPDATE-6 NAMROOD NVDA", @"Trade Update - Manage your risk
 FLIPPED - DIPS ARE BOUGHT
 
