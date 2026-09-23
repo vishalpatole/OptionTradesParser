@@ -15,8 +15,9 @@ namespace OptionTradesParser
         // Matches "288", "288.5", and ".32" alike, since traders often drop the leading zero on a premium.
         private const string Num = @"(?:\d+\.?\d*|\.\d+)";
 
-        // TICKER + STRIKE + C/P or CALL/PUT, e.g. "SPY 757P", "IWM 288 CALL". Ticker stays case-sensitive to avoid matching prose.
-        private static readonly Regex ContractRegex = new($@"\b([A-Z]{{1,5}})\s*({Num})\s*(?i:(CALL|PUT|C|P))\b", Opts);
+        // TICKER + STRIKE + C/P or CALL/PUT, e.g. "SPY 757P", "$ORCL $160C", "IWM 288 CALL".
+        // Accept optional $ prefixes because many desks write contracts like "$SPY $550C" or "$ORCL $160C".
+        private static readonly Regex ContractRegex = new($@"(?<![A-Za-z0-9])\$?([A-Z]{{1,5}})\s*\$?({Num})\s*(?i:(CALL|PUT|C|P))\b", Opts);
         private static readonly Regex TickerHereRegex = new(@"\b([A-Z]{1,5})\s+here\b", OptsIc);
         private static readonly Regex DetachedContractRegex = new(
             $@"(?m)^\s*\d{{1,2}}/\d{{1,2}}(?:/\d{{2,4}})?\s+({Num})\s*([CPcp])\b", Opts);
@@ -34,7 +35,7 @@ namespace OptionTradesParser
         private static readonly Regex AverageDownRegex = new(@"\baverag(?:e|ed|ing)\b|\badding\s+to\b", OptsIc);
 
         private static readonly Regex ArrowPriceRegex = new($@"\$?({Num})\s*(?:->|\s-\s)\s*\$?({Num})", Opts);
-        private static readonly Regex EntryLabelRegex = new($@"\b(?:Entry|Added\s+\d+\s*@)\b\s*[:\-]?\s*\r?\n?\s*\$?({Num})", OptsIc);
+        private static readonly Regex EntryLabelRegex = new($@"\b(?:Entry|Added\s+\d+\s*@)\b(?:\s+at)?\s*[:\-]?\s*\$?({Num})", OptsIc);
         private static readonly Regex AveragePriceRegex = new($@"\bAvg\.?\s*[:\-]?\s*\$?({Num})", OptsIc);
         private static readonly Regex ExitLabelRegex = new($@"\b(?:Exit|avg)\b\.?\s*[:\-]?\s*\r?\n?\s*\$?({Num})", OptsIc);
         private static readonly Regex ShorthandAtPriceRegex = new($@"@\s*\$?({Num})\b", Opts);

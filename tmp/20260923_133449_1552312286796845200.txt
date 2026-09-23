@@ -1,0 +1,10 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: (empty)
+   ├── Forwarded #1 Embed #1: Title="🚀 +10% — AMZN 255C · 0DTE" Description="**$0.475 → $0.545** · +14.7% (+$7.00/contract)
+**Close or trim & set SL to breakeven.**
+[Open Live Dashboard →](https://swiftoptions.pro/desk)
+
+**Notes:**
+⚠️ Lotto Trade — RISKY"

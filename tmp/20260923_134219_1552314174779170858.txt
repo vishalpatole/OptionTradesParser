@@ -1,0 +1,4 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: $IWM $285C $284P lotto entry <@&1531936405561938033>

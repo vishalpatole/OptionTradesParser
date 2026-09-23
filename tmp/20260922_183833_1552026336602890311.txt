@@ -1,0 +1,4 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: $ORCL $160C Friday entry at $.45 <@&1531936405561938033>

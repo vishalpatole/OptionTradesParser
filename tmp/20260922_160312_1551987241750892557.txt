@@ -1,0 +1,17 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531936082868965439>
+   ├── Forwarded #1 Embed #1: Title="🟢 BUY — QQQ 740P · 0DTE" Description="Entered **QQQ Sep22 '26 740 Put**
+**⚠️ Super Lotto Trade — Super RISKY**
+[Open Live Dashboard →](https://swiftoptions.pro/desk)"
+   │      Field: Entry = `$0.195`
+   │      Field: Contracts = `200`
+   │      Field: Cost = `$3,900`
+   │      Field: Trim Targets = ```
+25%   $0.244
+50%   $0.293
+75%   $0.341
+100%  $0.390
+```
+   │      Field: News backdrop = 🟢 Tech leaning **up** — 20 up / 5 down in the last 6h

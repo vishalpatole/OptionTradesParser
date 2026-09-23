@@ -1,0 +1,7 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531934124804407376>  *Riskier*
+SPY here
+09/23 771C
+Avg. 1.30

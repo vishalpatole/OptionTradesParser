@@ -1,0 +1,17 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531936082868965439>
+   ├── Forwarded #1 Embed #1: Title="🟢 BUY — NVDA 230C · Sep 23" Description="Entered **NVDA Sep23 '26 230 Call**
+**⚠️ Lotto Trade — RISKY**
+[Open Live Dashboard →](https://swiftoptions.pro/desk)"
+   │      Field: Entry = `$0.855`
+   │      Field: Contracts = `15`
+   │      Field: Cost = `$1,283`
+   │      Field: Trim Targets = ```
+25%   $1.069
+50%   $1.283
+75%   $1.496
+100%  $1.710
+```
+   │      Field: News backdrop = 🟢 Semiconductors leaning **up** — 4 up / 3 down in the last 6h

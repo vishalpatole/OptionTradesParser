@@ -1,0 +1,6 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: BTO $MSFT 510c 09/23 @0.75
+
+<@&1531934356762005604>

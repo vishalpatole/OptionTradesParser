@@ -34,12 +34,14 @@ namespace OptionTradesParser
                         RiskCategory TEXT,
                         AlertTimestamp TEXT,
                         Timestamp TEXT,
-                        RawMessage TEXT
+                        RawMessage TEXT,
+                        TradeContextPollingComplete INTEGER DEFAULT 0
                     );";
                 command.ExecuteNonQuery();
 
                 AddColumnIfMissing(command, "TradeAlerts", "AlertTimestamp");
                 AddColumnIfMissing(command, "TradeAlerts", "ContractSymbol");
+                AddColumnIfMissing(command, "TradeAlerts", "TradeContextPollingComplete");
 
                 // 2. 🔥 REFACTORED: Added ClientId, OptionType, Strike and converted to a 5-Column Composite Primary Key
                 command.CommandText = @"
@@ -63,6 +65,30 @@ namespace OptionTradesParser
 
                 AddColumnIfMissing(command, "ExecutedOrders", "Expiration");
                 AddColumnIfMissing(command, "ExecutedOrders", "ContractSymbol");
+
+                // 2b. Market-condition snapshot captured once per trade by the separate MarketContextWorker process.
+                command.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS MarketContext (
+                        DiscordMessageId INTEGER PRIMARY KEY,
+                        CapturedAt TEXT,
+                        UnderlyingPrice REAL,
+                        DayHigh REAL,
+                        DayLow REAL,
+                        Vix REAL,
+                        ImpliedVol REAL,
+                        OpenInterest REAL,
+                        SupportLevel REAL,
+                        SupportTouches INTEGER,
+                        ResistanceLevel REAL,
+                        ResistanceTouches INTEGER,
+                        PutWallStrike REAL,
+                        PutWallOI REAL,
+                        CallWallStrike REAL,
+                        CallWallOI REAL,
+                        Notes TEXT,
+                        FOREIGN KEY(DiscordMessageId) REFERENCES TradeAlerts(DiscordMessageId)
+                    );";
+                command.ExecuteNonQuery();
 
                 // 3. Central System Audit Log Table
                 command.CommandText = @"

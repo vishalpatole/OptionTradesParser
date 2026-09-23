@@ -1,0 +1,9 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531933581813878844>
+   ├── Forwarded #1 Embed #1: Title="Close or Trim & Set SL to BE" Description="```ansi
+[1;30;47mINTC 118C 2026-09-21
+0.8200  →  1.24   P/L: +51.22% ($42.00)[0m
+```
+[@Namrood](https://www.prismagroup.online/)  -  [LIVE DASHBOARD](https://dashboard.prismagroup.online/)"

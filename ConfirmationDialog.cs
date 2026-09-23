@@ -21,6 +21,7 @@ namespace OptionTradesParser
         string MarketQuote,
         string ContractSymbol,
         string RiskCategory,
+        string AccountType,
         bool ContractInferred,
         IReadOnlyList<string> Warnings);
 
@@ -98,12 +99,21 @@ namespace OptionTradesParser
             fields.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             fields.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-            void AddRow(string label, string value)
+            void AddRow(string label, string value, bool boldValue = false)
             {
                 int row = fields.RowCount++;
                 fields.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 fields.Controls.Add(new Label { Text = label, AutoSize = true, Font = new Font("Segoe UI", 11.5F, FontStyle.Bold), Margin = new Padding(0, 3, 20, 3) }, 0, row);
-                fields.Controls.Add(new Label { Text = value, AutoSize = true, Margin = new Padding(0, 3, 0, 3) }, 1, row);
+                fields.Controls.Add(new Label
+                {
+                    Text = value,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 11.5F, boldValue ? FontStyle.Bold : FontStyle.Regular),
+                    Margin = new Padding(0, 3, 0, 3),
+                    ForeColor = boldValue && (value.Equals("PAPER", StringComparison.OrdinalIgnoreCase) || value.Equals("LIVE", StringComparison.OrdinalIgnoreCase))
+                        ? (value.Equals("LIVE", StringComparison.OrdinalIgnoreCase) ? Color.DarkGreen : Color.DarkOrange)
+                        : SystemColors.ControlText,
+                }, 1, row);
             }
 
             AddRow("Trader:", d.Trader);
@@ -113,6 +123,7 @@ namespace OptionTradesParser
             AddRow("Strike:", d.Strike.ToString());
             AddRow("Expiry:", d.Expiry);
             AddRow("Quantity:", d.Quantity.ToString());
+            AddRow("Account Type:", d.AccountType, true);
             AddRow("Order:", $"{d.OrderAction} {d.Quantity} @ {d.OrderType} ${d.LimitPrice:F2}");
             AddRow("Contract:", d.ContractSymbol);
             AddRow("Market Quote:", d.MarketQuote);

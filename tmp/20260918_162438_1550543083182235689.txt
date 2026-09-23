@@ -1,0 +1,19 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default
+   ├── Content:     SWIFT TRADES · LIVE DESK
+🟢 BUY — YINN 30C · Oct 2
+Entered YINN Oct02 '26 30 Call
+Open Live Dashboard →
+Entry
+$0.13
+Contracts
+20
+Cost
+$260
+Trim Targets
+25%   $0.163
+50%   $0.195
+75%   $0.228
+100%  $0.260
+Image
+Real trade · data via IBKR · Not financial advice•Today at 9:22 AM

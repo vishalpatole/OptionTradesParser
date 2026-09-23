@@ -23,6 +23,7 @@ namespace OptionTradesParser
             // IBKR API Parsing Coordinates
             string ibHost = config["IBKRSettings:Host"] ?? "127.0.0.1";
             int ibPort = int.Parse(config["IBKRSettings:Port"] ?? "7497");
+            string ibAccountType = (config["IBKRSettings:AccountType"] ?? "PAPER").Trim();
             // Randomized for now (range 20-111) to dodge stale-connection clientId clashes on TWS.
             int ibClientId = Random.Shared.Next(20, 112);
             int ibQty = int.Parse(config["IBKRSettings:DefaultQuantity"] ?? "5");
@@ -42,7 +43,7 @@ namespace OptionTradesParser
             var parser = new MessageParser();
 
             // 3. Initialize High-Performance Pre-Trade Confirmation Engine & Connection Socket
-            var executionService = new OrderExecutionService(ibHost, ibPort, ibClientId, ibQty);
+            var executionService = new OrderExecutionService(ibHost, ibPort, ibClientId, ibQty, ibAccountType);
 
             // Pass execution service back over to map relational constraints cleanly
             executionService.SetDatabaseService(databaseService);

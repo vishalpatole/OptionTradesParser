@@ -24,6 +24,7 @@ namespace OptionTradesParser
         private int _currentOrderId = 0;
         private readonly int _clientId; // 🔥 Tracker handle
         private readonly int _defaultQty;
+        private readonly string _accountType;
         private int _reconnectLoopActive;
         private DatabaseService? _dbService;
         private ulong _activeDiscordMessageId = 0;
@@ -36,7 +37,7 @@ namespace OptionTradesParser
         // Serializes the console confirmation prompt so concurrent alerts cannot steal each other's keystrokes.
         private readonly object _promptGate = new();
 
-        public OrderExecutionService(string host, int port, int clientId, int defaultQty)
+        public OrderExecutionService(string host, int port, int clientId, int defaultQty, string accountType)
         {
             _readerSignal = new EReaderMonitorSignal();
             _clientSocket = new EClientSocket(this, _readerSignal);
@@ -44,6 +45,7 @@ namespace OptionTradesParser
             _port = port;
             _clientId = clientId;
             _defaultQty = defaultQty;
+            _accountType = string.IsNullOrWhiteSpace(accountType) ? "PAPER" : accountType.Trim().ToUpperInvariant();
 
             // "Connection refused" at startup usually means TWS hasn't finished its own boot/login yet
             // (this is routine right after TWS's nightly restart), so the first attempt gets retried too.
@@ -342,6 +344,7 @@ namespace OptionTradesParser
             Console.WriteLine($"   ├── Source Trader: {trade.TraderName}");
             Console.WriteLine($"   ├── Intent Action: {action}");
             Console.WriteLine($"   ├── Parsed Alert:  {trade.Ticker} {trade.Expiration} {trade.Strike}{(trade.OptionType == "CALL" ? "C" : "P")} @ ${trade.PricePaid:F2}{(trade.ContractInferred ? " [INFERRED CONTRACT]" : string.Empty)}");
+            Console.WriteLine($"   ├── Account Type:  {_accountType}");
             Console.WriteLine($"   ├── IBKR Contract: {contract.LocalSymbol} (conId {contract.ConId}, {contract.TradingClass} @ {contract.Exchange})");
             Console.WriteLine($"   ├── Market Quote:  {DescribeQuote(quote)}");
             Console.WriteLine($"   └── Working Order: {orderAction} {orderQty} @ LMT ${limitPrice}");
@@ -383,6 +386,7 @@ namespace OptionTradesParser
                 MarketQuote: DescribeQuote(quote),
                 ContractSymbol: $"{contract.LocalSymbol} (conId {contract.ConId}, {contract.TradingClass} @ {contract.Exchange})",
                 RiskCategory: trade.RiskCategory,
+                AccountType: _accountType,
                 ContractInferred: trade.ContractInferred,
                 Warnings: warnings);
 
