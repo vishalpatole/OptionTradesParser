@@ -1,0 +1,3 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default
+   ├── Content:     spx 7650P - 0.7

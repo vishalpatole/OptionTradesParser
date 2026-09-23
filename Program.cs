@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.IO;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
@@ -26,7 +27,16 @@ namespace OptionTradesParser
             string ibAccountType = (config["IBKRSettings:AccountType"] ?? "PAPER").Trim();
             // Randomized for now (range 20-111) to dodge stale-connection clientId clashes on TWS.
             int ibClientId = Random.Shared.Next(20, 112);
-            int ibQty = int.Parse(config["IBKRSettings:DefaultQuantity"] ?? "5");
+            double[] orderBudgets = config.GetSection("IBKRSettings:OrderBudgets")
+                .GetChildren()
+                .Select(item => double.TryParse(item.Value, out double budget) ? budget : 0)
+                .Where(budget => budget > 0)
+                .ToArray();
+            if (orderBudgets.Length != 3)
+            {
+                Console.WriteLine("❌ ERROR: IBKRSettings:OrderBudgets must contain exactly three positive dollar amounts.");
+                return;
+            }
             Console.WriteLine($"🎲 [IBKR] Using random ClientId: {ibClientId}");
 
             if (!ulong.TryParse(rawChannelId, out ulong targetChannelId) || string.IsNullOrEmpty(botToken) || botToken == "YOUR_ACTUAL_BOT_TOKEN_HERE" || targetChannelId == 0)
@@ -43,7 +53,7 @@ namespace OptionTradesParser
             var parser = new MessageParser();
 
             // 3. Initialize High-Performance Pre-Trade Confirmation Engine & Connection Socket
-            var executionService = new OrderExecutionService(ibHost, ibPort, ibClientId, ibQty, ibAccountType);
+            var executionService = new OrderExecutionService(ibHost, ibPort, ibClientId, orderBudgets, ibAccountType);
 
             // Pass execution service back over to map relational constraints cleanly
             executionService.SetDatabaseService(databaseService);

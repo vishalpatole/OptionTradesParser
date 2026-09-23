@@ -1,0 +1,3 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default
+   ├── Content:     spx 7700P - 1.8

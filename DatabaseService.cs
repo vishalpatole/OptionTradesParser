@@ -65,6 +65,9 @@ namespace OptionTradesParser
 
                 AddColumnIfMissing(command, "ExecutedOrders", "Expiration");
                 AddColumnIfMissing(command, "ExecutedOrders", "ContractSymbol");
+                AddColumnIfMissing(command, "ExecutedOrders", "ParentOrderId", "INTEGER");
+                AddColumnIfMissing(command, "ExecutedOrders", "OrderRole");
+                AddColumnIfMissing(command, "ExecutedOrders", "LimitPrice", "REAL");
 
                 // 2b. Market-condition snapshot captured once per trade by the separate MarketContextWorker process.
                 command.CommandText = @"
@@ -113,12 +116,12 @@ namespace OptionTradesParser
         public static string FormatContractSymbol(string ticker, string expiry, double strike, string optionType)
             => $"{ticker} {expiry} {strike}{(optionType == "CALL" ? "C" : "P")}";
 
-        private static void AddColumnIfMissing(SqliteCommand command, string table, string column)
+        private static void AddColumnIfMissing(SqliteCommand command, string table, string column, string columnType = "TEXT")
         {
             command.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}';";
             if (Convert.ToInt64(command.ExecuteScalar() ?? 0L) > 0) return;
 
-            command.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} TEXT;";
+            command.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {columnType};";
             command.ExecuteNonQuery();
         }
 
@@ -205,7 +208,7 @@ namespace OptionTradesParser
         }
 
         // 🔥 REFACTORED: Now accepts ClientId, OptionType, and Strike to satisfy the unique primary key constraint
-        public void LogExecutedOrder(int ibOrderId, int clientId, ulong discordMessageId, string ticker, string optionType, double strike, string expiry, string action, int quantity, string status)
+        public void LogExecutedOrder(int ibOrderId, int clientId, ulong discordMessageId, string ticker, string optionType, double strike, string expiry, string action, int quantity, string status, int? parentOrderId, string orderRole, double limitPrice)
         {
             try
             {
@@ -215,8 +218,8 @@ namespace OptionTradesParser
                     var command = connection.CreateCommand();
                     
                     command.CommandText = @"
-                        INSERT OR REPLACE INTO ExecutedOrders (IbOrderId, ClientId, DiscordMessageId, Ticker, OptionType, Strike, Expiration, ContractSymbol, ActionType, Quantity, Status, Timestamp)
-                        VALUES ($ibId, $clientId, $discordId, $ticker, $optType, $strike, $expiry, $symbol, $action, $qty, $status, $time);";
+                        INSERT OR REPLACE INTO ExecutedOrders (IbOrderId, ClientId, DiscordMessageId, Ticker, OptionType, Strike, Expiration, ContractSymbol, ActionType, Quantity, Status, Timestamp, ParentOrderId, OrderRole, LimitPrice)
+                        VALUES ($ibId, $clientId, $discordId, $ticker, $optType, $strike, $expiry, $symbol, $action, $qty, $status, $time, $parentOrderId, $orderRole, $limitPrice);";
                     
                     command.Parameters.AddWithValue("$ibId", ibOrderId);
                     command.Parameters.AddWithValue("$clientId", clientId);
@@ -230,6 +233,9 @@ namespace OptionTradesParser
                     command.Parameters.AddWithValue("$qty", quantity);
                     command.Parameters.AddWithValue("$status", status);
                     command.Parameters.AddWithValue("$time", UtcStamp(DateTimeOffset.UtcNow));
+                    command.Parameters.AddWithValue("$parentOrderId", (object?)parentOrderId ?? DBNull.Value);
+                    command.Parameters.AddWithValue("$orderRole", orderRole);
+                    command.Parameters.AddWithValue("$limitPrice", limitPrice);
 
                     command.ExecuteNonQuery();
                     Console.WriteLine($"📝 [OMS TRACKER] Multi-Composite Order Rule Locked: ID #{ibOrderId} | Client {clientId} | {ticker} {strike}{optionType} saved successfully.");

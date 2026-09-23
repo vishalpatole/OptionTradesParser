@@ -17,7 +17,7 @@ namespace OptionTradesParser
 
         // TICKER + STRIKE + C/P or CALL/PUT, e.g. "SPY 757P", "$ORCL $160C", "IWM 288 CALL".
         // Accept optional $ prefixes because many desks write contracts like "$SPY $550C" or "$ORCL $160C".
-        private static readonly Regex ContractRegex = new($@"(?<![A-Za-z0-9])\$?([A-Z]{{1,5}})\s*\$?({Num})\s*(?i:(CALL|PUT|C|P))\b", Opts);
+        private static readonly Regex ContractRegex = new($@"(?<![A-Za-z0-9])\$?([A-Z]{{1,5}})\s*\$?({Num})\s*(CALL|PUT|C|P)\b", OptsIc);
         private static readonly Regex TickerHereRegex = new(@"\b([A-Z]{1,5})\s+here\b", OptsIc);
         private static readonly Regex DetachedContractRegex = new(
             $@"(?m)^\s*\d{{1,2}}/\d{{1,2}}(?:/\d{{2,4}})?\s+({Num})\s*([CPcp])\b", Opts);
@@ -44,7 +44,7 @@ namespace OptionTradesParser
 
         // Block form such as "INTC 97C 0DTE 0.9" or "SPCX 148C 9/18/2026 $2.88": premium is the last value on the line.
         private static readonly Regex LineTailPriceRegex = new(
-            $@"(?m)^[^\r\n]*?\b[A-Z]{{1,5}}\s*{Num}\s*[CPcp]\b[^\r\n]*?\$?({Num})\s*$", Opts);
+            $@"(?m)^[^\r\n]*?\b[A-Z]{{1,5}}\s*{Num}\s*[CP]\b[^\r\n]*?\$?({Num})\s*$", OptsIc);
 
         public ParsedTrade? TryParse(string rawContent, Func<string, string, TradeContractContext?>? contextResolver = null)
         {

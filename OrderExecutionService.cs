@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using IBApi; 
@@ -23,28 +26,66 @@ namespace OptionTradesParser
         private readonly int _port;
         private int _currentOrderId = 0;
         private readonly int _clientId; // 🔥 Tracker handle
-        private readonly int _defaultQty;
+        private readonly IReadOnlyList<double> _orderBudgets;
         private readonly string _accountType;
         private int _reconnectLoopActive;
         private DatabaseService? _dbService;
         private ulong _activeDiscordMessageId = 0;
         private readonly ManualResetEventSlim _orderIdReady = new(false);
         private readonly ContractRequestBook _contractRequests = new();
+        private readonly MarketRuleRequestBook _marketRuleRequests = new();
         private readonly PositionBook _positions = new();
         private readonly QuoteBook _quotes = new();
+        private readonly ConcurrentDictionary<int, PendingEntryOrder> _pendingEntryOrders = new();
+        private readonly ConcurrentDictionary<int, ActiveTakeProfitOrder> _activeTakeProfitOrders = new();
         private Thread? _readerThread;
 
         // Serializes the console confirmation prompt so concurrent alerts cannot steal each other's keystrokes.
         private readonly object _promptGate = new();
 
-        public OrderExecutionService(string host, int port, int clientId, int defaultQty, string accountType)
+        private sealed class PendingEntryOrder
+        {
+            public PendingEntryOrder(Contract contract, ParsedTrade trade, int quantity, ulong discordMessageId, IReadOnlyList<PriceIncrementRule> priceRules)
+            {
+                Contract = contract;
+                Trade = trade;
+                Quantity = quantity;
+                DiscordMessageId = discordMessageId;
+                PriceRules = priceRules;
+            }
+
+            public Contract Contract { get; }
+            public ParsedTrade Trade { get; }
+            public int Quantity { get; }
+            public ulong DiscordMessageId { get; }
+            public IReadOnlyList<PriceIncrementRule> PriceRules { get; }
+            public object SyncRoot { get; } = new();
+            public int LastEntryFilled { get; set; }
+            public double LastAverageFillPrice { get; set; }
+            public Dictionary<int, TargetLevelState> Targets { get; } = new();
+        }
+
+        private sealed class TargetLevelState
+        {
+            public int CompletedQuantity { get; set; }
+            public int? WorkingOrderId { get; set; }
+            public int WorkingOrderFilled { get; set; }
+            public int SubmittedQuantity { get; set; }
+            public double SubmittedPrice { get; set; }
+        }
+
+        private sealed record ActiveTakeProfitOrder(int ContractId, int ParentEntryOrderId, int Level, ManualResetEventSlim Completed);
+
+        private sealed record ResolvedContract(Contract Contract, IReadOnlyList<PriceIncrementRule> PriceRules);
+
+        public OrderExecutionService(string host, int port, int clientId, IReadOnlyList<double> orderBudgets, string accountType)
         {
             _readerSignal = new EReaderMonitorSignal();
             _clientSocket = new EClientSocket(this, _readerSignal);
             _host = host;
             _port = port;
             _clientId = clientId;
-            _defaultQty = defaultQty;
+            _orderBudgets = orderBudgets;
             _accountType = string.IsNullOrWhiteSpace(accountType) ? "PAPER" : accountType.Trim().ToUpperInvariant();
 
             // "Connection refused" at startup usually means TWS hasn't finished its own boot/login yet
@@ -140,10 +181,36 @@ namespace OptionTradesParser
                 _dbService?.LogAudit(_activeDiscordMessageId, "-", "IBKR_API_ERROR", errorCode.ToString(), $"id={id} :: {errorMsg}");
             }
 
+            if (id > 0 && IsOrderRejection(errorCode, advancedOrderRejectJson)
+                && _activeTakeProfitOrders.TryRemove(id, out ActiveTakeProfitOrder? rejectedTarget))
+            {
+                if (_pendingEntryOrders.TryGetValue(rejectedTarget.ParentEntryOrderId, out PendingEntryOrder? entry))
+                {
+                    lock (entry.SyncRoot)
+                    {
+                        TargetLevelState levelState = GetTargetState(entry, rejectedTarget.Level);
+                        if (levelState.WorkingOrderId == id)
+                        {
+                            levelState.CompletedQuantity += levelState.WorkingOrderFilled;
+                            levelState.WorkingOrderId = null;
+                            levelState.WorkingOrderFilled = 0;
+                            levelState.SubmittedQuantity = 0;
+                        }
+                    }
+
+                    _dbService?.UpdateOrderStatus(id, _clientId, "REJECTED");
+                    _dbService?.LogAudit(entry.DiscordMessageId, entry.Trade.Ticker, "TAKE_PROFIT_ROUTING", "REJECTED",
+                        $"TP{rejectedTarget.Level} order #{id} rejected by IBKR ({errorCode}): {errorMsg}");
+                }
+
+                rejectedTarget.Completed.Set();
+            }
+
             // Releases any caller blocked on a contract lookup that TWS just rejected (e.g. code 200).
             if (id > 0)
             {
                 _contractRequests.Complete(id);
+                _marketRuleRequests.Complete(id);
                 _quotes.Complete(id);
             }
         }
@@ -151,6 +218,9 @@ namespace OptionTradesParser
         public override void error(string str) => Console.WriteLine($"X [IBKR ERROR] {str}");
 
         public override void error(Exception e) => Console.WriteLine($"X [IBKR EXCEPTION] {e.Message}");
+
+        private static bool IsOrderRejection(int errorCode, string advancedOrderRejectJson)
+            => errorCode is 110 or 201 or 399 or 463 || !string.IsNullOrWhiteSpace(advancedOrderRejectJson);
 
         public override void openOrder(int orderId, Contract contract, Order order, OrderState orderState)
         {
@@ -208,6 +278,11 @@ namespace OptionTradesParser
             _contractRequests.Complete(reqId);
         }
 
+        public override void marketRule(int marketRuleId, PriceIncrement[] priceIncrements)
+        {
+            _marketRuleRequests.Complete(marketRuleId, priceIncrements);
+        }
+
         public override void position(string account, Contract contract, decimal pos, double avgCost)
         {
             _positions.Record(contract.ConId, pos);
@@ -244,9 +319,39 @@ namespace OptionTradesParser
                 + (string.IsNullOrWhiteSpace(whyHeld) ? string.Empty : $" | held: {whyHeld}"));
             Console.ResetColor();
 
+            if (_activeTakeProfitOrders.TryGetValue(orderId, out ActiveTakeProfitOrder? activeTarget)
+                && _pendingEntryOrders.TryGetValue(activeTarget.ParentEntryOrderId, out PendingEntryOrder? targetEntry))
+            {
+                lock (targetEntry.SyncRoot)
+                {
+                    TargetLevelState levelState = GetTargetState(targetEntry, activeTarget.Level);
+                    levelState.WorkingOrderFilled = Math.Max(levelState.WorkingOrderFilled, (int)filled);
+                    if (isTerminal)
+                    {
+                        levelState.CompletedQuantity += levelState.WorkingOrderFilled;
+                        levelState.WorkingOrderId = null;
+                        levelState.WorkingOrderFilled = 0;
+                        levelState.SubmittedQuantity = 0;
+                    }
+                }
+            }
+
             if (isTerminal)
             {
                 _dbService?.UpdateOrderStatus(orderId, clientId, status.ToUpperInvariant());
+                if (_activeTakeProfitOrders.TryRemove(orderId, out ActiveTakeProfitOrder? target))
+                {
+                    target.Completed.Set();
+                }
+            }
+
+            if (filled > 0 && avgFillPrice > 0 && _pendingEntryOrders.TryGetValue(orderId, out PendingEntryOrder? entry))
+            {
+                ReconcileTakeProfitOrders(orderId, entry, (int)filled, avgFillPrice);
+            }
+            else if (isTerminal && filled == 0)
+            {
+                _pendingEntryOrders.TryRemove(orderId, out _);
             }
         }
 
@@ -277,18 +382,20 @@ namespace OptionTradesParser
                 return;
             }
 
-            Contract? contract = ResolveContract(ticker, trade.OptionType, trade.Strike, trade.Expiration);
-            if (contract == null)
+            ResolvedContract? resolvedContract = ResolveContract(ticker, trade.OptionType, trade.Strike, trade.Expiration);
+            if (resolvedContract == null)
             {
                 Block(discordMsgId, ticker, "CONTRACT_VALIDATION", "BLOCKED",
                     $"IBKR returned no tradable contract for {ticker} {trade.Expiration} {trade.Strike} {trade.OptionType}.");
                 return;
             }
+            Contract contract = resolvedContract.Contract;
 
             bool isExit = action is "SELL" or "TRIM" or "SOLD_ALL";
             string orderAction = isExit ? "SELL" : "BUY";
             int orderQty;
             string? sizingWarning = null;
+            IReadOnlyList<TradeBudgetOption> budgetOptions = Array.Empty<TradeBudgetOption>();
 
             if (isExit)
             {
@@ -324,14 +431,22 @@ namespace OptionTradesParser
             }
             else
             {
-                orderQty = _defaultQty;
+                orderQty = 0;
             }
 
-            double limitPrice = Math.Round(trade.PricePaid, 2, MidpointRounding.AwayFromZero);
+            double limitPrice = OrderSizing.SnapPrice(trade.PricePaid, resolvedContract.PriceRules, roundUp: false);
             if (limitPrice < 0.01)
             {
                 Block(discordMsgId, ticker, "PRICE_VALIDATION", "BLOCKED", $"Alert price {trade.PricePaid} is not a usable limit price.");
                 return;
+            }
+
+
+            if (!isExit)
+            {
+                budgetOptions = _orderBudgets
+                    .Select(budget => OrderSizing.ForBudget(budget, limitPrice))
+                    .ToArray();
             }
 
             var quote = RequestQuote(contract);
@@ -347,7 +462,9 @@ namespace OptionTradesParser
             Console.WriteLine($"   ├── Account Type:  {_accountType}");
             Console.WriteLine($"   ├── IBKR Contract: {contract.LocalSymbol} (conId {contract.ConId}, {contract.TradingClass} @ {contract.Exchange})");
             Console.WriteLine($"   ├── Market Quote:  {DescribeQuote(quote)}");
-            Console.WriteLine($"   └── Working Order: {orderAction} {orderQty} @ LMT ${limitPrice}");
+            Console.WriteLine(isExit
+                ? $"   └── Working Order: {orderAction} {orderQty} @ LMT ${limitPrice}"
+                : $"   └── Working Order: {orderAction} @ LMT ${limitPrice} — budget selected in dialog");
             Console.WriteLine("=======================================================");
             Console.ResetColor();
 
@@ -388,14 +505,52 @@ namespace OptionTradesParser
                 RiskCategory: trade.RiskCategory,
                 AccountType: _accountType,
                 ContractInferred: trade.ContractInferred,
-                Warnings: warnings);
-
-            bool approved = ConfirmationDialog.Confirm(details);
-
-            if (approved)
+                Warnings: warnings)
             {
-                _dbService?.LogAudit(discordMsgId, ticker, "PRE_TRADE_GATEWAY", "USER_APPROVED", $"User confirmed execution in the pre-trade dialog.");
-                PlaceOrder(contract, orderAction, orderQty, limitPrice, trade);
+                BudgetOptions = budgetOptions
+            };
+
+            TradeConfirmationResult confirmation = ConfirmationDialog.Confirm(details);
+
+            if (confirmation.Approved)
+            {
+                if (!isExit)
+                {
+                    if (confirmation.SelectedBudget == null)
+                    {
+                        Block(discordMsgId, ticker, "PRE_TRADE_GATEWAY", "BLOCKED", "No entry budget was selected.");
+                        return;
+                    }
+
+                    orderQty = confirmation.SelectedBudget.Quantity;
+                }
+                else
+                {
+                    if (!CancelWorkingTakeProfits(contract.ConId))
+                    {
+                        Block(discordMsgId, ticker, "TAKE_PROFIT_CANCELLATION", "BLOCKED",
+                            "Working take-profit orders did not reach a terminal state before the timeout.");
+                        return;
+                    }
+
+                    decimal? refreshedHeld = GetHeldQuantity(contract.ConId);
+                    if (refreshedHeld == null || refreshedHeld.Value <= 0)
+                    {
+                        Block(discordMsgId, ticker, "POSITION_REVALIDATION", "BLOCKED",
+                            "No position remained after cancelling working take-profit orders.");
+                        return;
+                    }
+
+                    orderQty = action == "TRIM"
+                        ? (int)Math.Clamp(Math.Round(refreshedHeld.Value * (decimal)trade.TrimFraction, MidpointRounding.AwayFromZero), 1m, refreshedHeld.Value)
+                        : (int)refreshedHeld.Value;
+                }
+
+                string approvalDetails = confirmation.SelectedBudget == null
+                    ? "User confirmed execution in the pre-trade dialog."
+                    : $"User selected ${confirmation.SelectedBudget.Budget:F2}; {orderQty} contracts estimated at ${confirmation.SelectedBudget.EstimatedValue:F2}.";
+                _dbService?.LogAudit(discordMsgId, ticker, "PRE_TRADE_GATEWAY", "USER_APPROVED", approvalDetails);
+                PlaceOrder(contract, resolvedContract.PriceRules, orderAction, orderQty, limitPrice, trade);
             }
             else
             {
@@ -408,7 +563,7 @@ namespace OptionTradesParser
         }
 
         /// Asks TWS to resolve the alert into a real, tradable contract before any order is built.
-        private Contract? ResolveContract(string ticker, string type, double strike, string expiry)
+        private ResolvedContract? ResolveContract(string ticker, string type, double strike, string expiry)
         {
             var query = new Contract {
                 Symbol = ticker,
@@ -437,8 +592,27 @@ namespace OptionTradesParser
                 Console.ResetColor();
             }
 
-            var chosen = matches.FirstOrDefault(d => d.Contract.TradingClass == ticker) ?? matches[0];
-            return chosen.Contract;
+            ContractDetails chosen = matches.FirstOrDefault(d => d.Contract.TradingClass == ticker) ?? matches[0];
+            return new ResolvedContract(chosen.Contract, ResolvePriceRules(chosen));
+        }
+
+        private IReadOnlyList<PriceIncrementRule> ResolvePriceRules(ContractDetails details)
+        {
+            string[] exchanges = (details.ValidExchanges ?? string.Empty).Split(',', StringSplitOptions.TrimEntries);
+            string[] ruleIds = (details.MarketRuleIds ?? string.Empty).Split(',', StringSplitOptions.TrimEntries);
+            int smartIndex = Array.FindIndex(exchanges, exchange => exchange.Equals("SMART", StringComparison.OrdinalIgnoreCase));
+
+            if (smartIndex >= 0 && smartIndex < ruleIds.Length && int.TryParse(ruleIds[smartIndex], out int marketRuleId))
+            {
+                _marketRuleRequests.OpenRequest(marketRuleId);
+                _clientSocket.reqMarketRule(marketRuleId);
+                IReadOnlyList<PriceIncrementRule> rules = _marketRuleRequests.WaitForResults(marketRuleId, BrokerReplyTimeout);
+                if (rules.Count > 0) return rules;
+            }
+
+            double fallbackIncrement = details.MinTick > 0 ? details.MinTick : 0.01;
+            Console.WriteLine($"⚠️ [MARKET RULE] Using contract minimum tick ${fallbackIncrement} because SMART price bands were unavailable.");
+            return new[] { new PriceIncrementRule(0, fallbackIncrement) };
         }
 
         /// Returns the quantity IBKR itself reports for the contract, or null if the snapshot never arrived.
@@ -491,7 +665,7 @@ namespace OptionTradesParser
             return null;
         }
 
-        private void PlaceOrder(Contract contract, string orderAction, int orderQty, double limitPrice, ParsedTrade trade)
+        private void PlaceOrder(Contract contract, IReadOnlyList<PriceIncrementRule> priceRules, string orderAction, int orderQty, double limitPrice, ParsedTrade trade)
         {
             var order = new Order {
                 Action = orderAction,
@@ -504,6 +678,11 @@ namespace OptionTradesParser
 
             int orderId = Interlocked.Increment(ref _currentOrderId) - 1;
 
+            if (orderAction == "BUY")
+            {
+                _pendingEntryOrders[orderId] = new PendingEntryOrder(contract, trade, orderQty, _activeDiscordMessageId, priceRules);
+            }
+
             _clientSocket.placeOrder(orderId, contract, order);
             Console.WriteLine("📬 [IBKR ROUTED]");
             Console.WriteLine($"   ├── Order ID: #{orderId}");
@@ -512,8 +691,105 @@ namespace OptionTradesParser
             Console.WriteLine($"   └── Submitted: {orderAction} {orderQty}x {contract.LocalSymbol} @ LMT ${limitPrice:F2}\n");
 
             // 🔥 UPDATED: Passes ClientId, type, and strike into the unique logging function
-            _dbService?.LogExecutedOrder(orderId, _clientId, _activeDiscordMessageId, trade.Ticker, trade.OptionType, trade.Strike, trade.Expiration, orderAction, orderQty, "SUBMITTED");
+            _dbService?.LogExecutedOrder(orderId, _clientId, _activeDiscordMessageId, trade.Ticker, trade.OptionType, trade.Strike, trade.Expiration, orderAction, orderQty, "SUBMITTED", null, orderAction == "BUY" ? "ENTRY" : "EXIT", limitPrice);
             _dbService?.LogAudit(_activeDiscordMessageId, trade.Ticker, "EXCHANGE_ROUTING", "SUBMITTED", $"Order ID #{orderId} successfully dispatched onto the market exchange.");
+        }
+
+        private void ReconcileTakeProfitOrders(int parentOrderId, PendingEntryOrder entry, int filledQuantity, double averageFillPrice)
+        {
+            lock (entry.SyncRoot)
+            {
+                if (filledQuantity == entry.LastEntryFilled && Math.Abs(averageFillPrice - entry.LastAverageFillPrice) < 0.000001) return;
+
+                TakeProfitPlan plan = OrderSizing.CreateTakeProfitPlan(
+                    entry.Quantity, filledQuantity, averageFillPrice, entry.PriceRules);
+
+                foreach (TakeProfitAllocation target in plan.Targets)
+                {
+                    TargetLevelState levelState = GetTargetState(entry, target.Level);
+                    int requiredOrderQuantity = target.Quantity - levelState.CompletedQuantity;
+                    if (requiredOrderQuantity <= 0) continue;
+
+                    bool needsNewOrder = levelState.WorkingOrderId == null;
+                    bool needsModification = levelState.SubmittedQuantity != requiredOrderQuantity
+                        || Math.Abs(levelState.SubmittedPrice - target.TargetPrice) > 0.000001;
+                    if (!needsNewOrder && !needsModification) continue;
+
+                    int targetOrderId = levelState.WorkingOrderId
+                        ?? (Interlocked.Increment(ref _currentOrderId) - 1);
+                    var targetOrder = new Order
+                    {
+                        Action = "SELL",
+                        OrderType = "LMT",
+                        LmtPrice = target.TargetPrice,
+                        TotalQuantity = requiredOrderQuantity,
+                        Tif = "DAY",
+                        OrderRef = $"OTP-{entry.DiscordMessageId}-TP{target.Level}",
+                        Transmit = true
+                    };
+
+                    if (needsNewOrder)
+                    {
+                        levelState.WorkingOrderId = targetOrderId;
+                        levelState.WorkingOrderFilled = 0;
+                        _activeTakeProfitOrders[targetOrderId] = new ActiveTakeProfitOrder(
+                            entry.Contract.ConId, parentOrderId, target.Level, new ManualResetEventSlim(false));
+                    }
+
+                    levelState.SubmittedQuantity = requiredOrderQuantity;
+                    levelState.SubmittedPrice = target.TargetPrice;
+                    _clientSocket.placeOrder(targetOrderId, entry.Contract, targetOrder);
+                    _dbService?.LogExecutedOrder(targetOrderId, _clientId, entry.DiscordMessageId, entry.Trade.Ticker,
+                        entry.Trade.OptionType, entry.Trade.Strike, entry.Trade.Expiration, "SELL", requiredOrderQuantity, "SUBMITTED",
+                        parentOrderId, $"TP{target.Level}", target.TargetPrice);
+                    _dbService?.LogAudit(entry.DiscordMessageId, entry.Trade.Ticker, "TAKE_PROFIT_ROUTING",
+                        needsNewOrder ? "SUBMITTED" : "MODIFIED",
+                        $"TP{target.Level} order #{targetOrderId}: SELL {requiredOrderQuantity} @ ${target.TargetPrice:F2}, based on {filledQuantity}/{entry.Quantity} filled @ ${averageFillPrice:F2} average.");
+                }
+
+                entry.LastEntryFilled = filledQuantity;
+                entry.LastAverageFillPrice = averageFillPrice;
+                Console.WriteLine($"🎯 [TAKE PROFITS] Entry #{parentOrderId} filled {filledQuantity}/{entry.Quantity} @ ${averageFillPrice:F2}. "
+                    + $"Active plan: {plan.Targets.Count} target(s); runner filled allocation: {plan.RunnerQuantity}.");
+                _dbService?.LogAudit(entry.DiscordMessageId, entry.Trade.Ticker, "TAKE_PROFIT_PLAN", "ACTIVE",
+                    $"Entry #{parentOrderId}; filled {filledQuantity}/{entry.Quantity}; {plan.Targets.Count} fixed targets; runner allocation {plan.RunnerQuantity}.");
+            }
+        }
+
+        private static TargetLevelState GetTargetState(PendingEntryOrder entry, int level)
+        {
+            if (!entry.Targets.TryGetValue(level, out TargetLevelState? state))
+            {
+                state = new TargetLevelState();
+                entry.Targets[level] = state;
+            }
+
+            return state;
+        }
+
+        private bool CancelWorkingTakeProfits(int contractId)
+        {
+            KeyValuePair<int, ActiveTakeProfitOrder>[] targets = _activeTakeProfitOrders
+                .Where(item => item.Value.ContractId == contractId)
+                .ToArray();
+            if (targets.Length == 0) return true;
+
+            foreach (KeyValuePair<int, ActiveTakeProfitOrder> target in targets)
+            {
+                _clientSocket.cancelOrder(target.Key, new OrderCancel());
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            foreach (KeyValuePair<int, ActiveTakeProfitOrder> target in targets)
+            {
+                TimeSpan remaining = BrokerReplyTimeout - stopwatch.Elapsed;
+                if (remaining <= TimeSpan.Zero || !target.Value.Completed.Wait(remaining))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private void Block(ulong discordMsgId, string ticker, string stage, string outcome, string reason)

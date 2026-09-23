@@ -6,6 +6,10 @@ using System.Windows.Forms;
 
 namespace OptionTradesParser
 {
+    public sealed record TradeBudgetOption(double Budget, int Quantity, double EstimatedValue);
+
+    public sealed record TradeConfirmationResult(bool Approved, TradeBudgetOption? SelectedBudget);
+
     /// Every labeled field shown on the pre-trade confirmation dialog.
     public sealed record TradeConfirmationDetails(
         string Trader,
@@ -23,18 +27,21 @@ namespace OptionTradesParser
         string RiskCategory,
         string AccountType,
         bool ContractInferred,
-        IReadOnlyList<string> Warnings);
+        IReadOnlyList<string> Warnings)
+    {
+        public IReadOnlyList<TradeBudgetOption> BudgetOptions { get; init; } = Array.Empty<TradeBudgetOption>();
+    }
 
     /// Raises the pre-trade confirmation as a large, clearly labeled Windows dialog instead of a plain MessageBox.
     public static class ConfirmationDialog
     {
-        public static bool Confirm(TradeConfirmationDetails details)
+        public static TradeConfirmationResult Confirm(TradeConfirmationDetails details)
         {
             if (OperatingSystem.IsWindows())
             {
                 try
                 {
-                    bool result = false;
+                    TradeConfirmationResult result = new(false, null);
 
                     // WinForms needs an STA thread; the caller here is a background Task.Run thread, so the
                     // dialog gets its own dedicated STA thread rather than requiring the whole app to be STA.
@@ -50,12 +57,13 @@ namespace OptionTradesParser
                 }
             }
 
-            return ConfirmOnConsole();
+            return ConfirmOnConsole(details);
         }
 
-        private static bool ShowForm(TradeConfirmationDetails d)
+        private static TradeConfirmationResult ShowForm(TradeConfirmationDetails d)
         {
             string optionCode = d.OptionType == "CALL" ? "C" : "P";
+            TradeBudgetOption? selectedBudget = null;
 
             using var form = new Form
             {
@@ -122,9 +130,12 @@ namespace OptionTradesParser
             AddRow("Type:", d.OptionType);
             AddRow("Strike:", d.Strike.ToString());
             AddRow("Expiry:", d.Expiry);
-            AddRow("Quantity:", d.Quantity.ToString());
+            if (d.BudgetOptions.Count == 0)
+                AddRow("Quantity:", d.Quantity.ToString());
             AddRow("Account Type:", d.AccountType, true);
-            AddRow("Order:", $"{d.OrderAction} {d.Quantity} @ {d.OrderType} ${d.LimitPrice:F2}");
+            AddRow("Order:", d.BudgetOptions.Count > 0
+                ? $"{d.OrderAction} at {d.OrderType} ${d.LimitPrice:F2} — select a budget below"
+                : $"{d.OrderAction} {d.Quantity} @ {d.OrderType} ${d.LimitPrice:F2}");
             AddRow("Contract:", d.ContractSymbol);
             AddRow("Market Quote:", d.MarketQuote);
             AddRow("Risk:", d.RiskCategory);
@@ -160,16 +171,39 @@ namespace OptionTradesParser
                 Padding = new Padding(12, 6, 12, 6),
                 Font = new Font("Segoe UI", 11.5F, FontStyle.Bold),
             };
-            var yesButton = new Button
+            if (d.BudgetOptions.Count == 0)
             {
-                Text = "&Yes — Execute",
-                DialogResult = DialogResult.Yes,
-                AutoSize = true,
-                Padding = new Padding(12, 6, 12, 6),
-                Margin = new Padding(0, 0, 10, 0),
-            };
+                var yesButton = new Button
+                {
+                    Text = "&Yes — Execute",
+                    DialogResult = DialogResult.Yes,
+                    AutoSize = true,
+                    Padding = new Padding(12, 6, 12, 6),
+                    Margin = new Padding(0, 0, 10, 0),
+                };
+                buttons.Controls.Add(yesButton);
+            }
+            else
+            {
+                foreach (var option in d.BudgetOptions.Reverse())
+                {
+                    var budgetButton = new Button
+                    {
+                        Text = $"${option.Budget:F0} — {option.Quantity} contract{(option.Quantity == 1 ? string.Empty : "s")} (${option.EstimatedValue:F0})",
+                        AutoSize = true,
+                        Padding = new Padding(12, 6, 12, 6),
+                        Margin = new Padding(0, 0, 10, 0),
+                    };
+                    budgetButton.Click += (_, _) =>
+                    {
+                        selectedBudget = option;
+                        form.DialogResult = DialogResult.Yes;
+                        form.Close();
+                    };
+                    buttons.Controls.Add(budgetButton);
+                }
+            }
             buttons.Controls.Add(noButton);
-            buttons.Controls.Add(yesButton);
             root.Controls.Add(buttons);
 
             form.Controls.Add(root);
@@ -178,21 +212,39 @@ namespace OptionTradesParser
             form.AcceptButton = noButton;
             form.CancelButton = noButton;
 
-            return form.ShowDialog() == DialogResult.Yes;
+            bool approved = form.ShowDialog() == DialogResult.Yes;
+            return new TradeConfirmationResult(approved, selectedBudget);
         }
 
-        private static bool ConfirmOnConsole()
+        private static TradeConfirmationResult ConfirmOnConsole(TradeConfirmationDetails details)
         {
             while (Console.KeyAvailable)
             {
                 Console.ReadKey(intercept: true);
             }
 
+            if (details.BudgetOptions.Count > 0)
+            {
+                Console.WriteLine("Select an order budget:");
+                for (int index = 0; index < details.BudgetOptions.Count; index++)
+                {
+                    TradeBudgetOption option = details.BudgetOptions[index];
+                    Console.WriteLine($"  [{index + 1}] ${option.Budget:F0} — {option.Quantity} contract(s), estimated ${option.EstimatedValue:F2}");
+                }
+                Console.Write("👉 Select [1-3] or [N] to drop: ");
+                ConsoleKeyInfo budgetKey = Console.ReadKey();
+                Console.WriteLine();
+                int selectedIndex = budgetKey.KeyChar - '1';
+                return selectedIndex >= 0 && selectedIndex < details.BudgetOptions.Count
+                    ? new TradeConfirmationResult(true, details.BudgetOptions[selectedIndex])
+                    : new TradeConfirmationResult(false, null);
+            }
+
             Console.Write("👉 Press [Y] to Execute on IBKR Account or [N] to Ignore/Drop Order: ");
             ConsoleKeyInfo key = Console.ReadKey();
             Console.WriteLine();
 
-            return key.Key == ConsoleKey.Y;
+            return new TradeConfirmationResult(key.Key == ConsoleKey.Y, null);
         }
     }
 }
