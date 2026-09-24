@@ -10,6 +10,8 @@ namespace OptionTradesParser
 
     public sealed record TradeConfirmationResult(bool Approved, TradeBudgetOption? SelectedBudget);
 
+    public sealed record BrowserApprovalDecision(string Status, double? SelectedBudget);
+
     /// Every labeled field shown on the pre-trade confirmation dialog.
     public sealed record TradeConfirmationDetails(
         string Trader,
@@ -216,7 +218,7 @@ namespace OptionTradesParser
             return new TradeConfirmationResult(approved, selectedBudget);
         }
 
-        private static TradeConfirmationResult ConfirmOnConsole(TradeConfirmationDetails details)
+        public static TradeConfirmationResult ConfirmOnConsole(TradeConfirmationDetails details)
         {
             while (Console.KeyAvailable)
             {

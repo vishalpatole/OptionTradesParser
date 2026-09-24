@@ -1,0 +1,6 @@
+@OptionTradesParser.Dashboard.Api_HostAddress = http://localhost:5262
+
+GET {{OptionTradesParser.Dashboard.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

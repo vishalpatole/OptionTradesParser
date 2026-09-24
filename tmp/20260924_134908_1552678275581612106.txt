@@ -1,0 +1,15 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531936082868965439>
+   ├── Forwarded #1 Embed #1: Title="🟢 BUY — TQQQ 79C · Oct 2" Description="Entered **TQQQ Oct02 '26 79 Call**
+[Open Live Dashboard →](https://swiftoptions.pro/desk)"
+   │      Field: Entry = `$1.63`
+   │      Field: Contracts = `10`
+   │      Field: Cost = `$1,630`
+   │      Field: Trim Targets = ```
+25%   $2.038
+50%   $2.445
+75%   $2.853
+100%  $3.260
+```

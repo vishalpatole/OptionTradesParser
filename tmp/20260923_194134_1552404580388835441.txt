@@ -1,0 +1,16 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: <@&1531936082868965439>
+   ├── Forwarded #1 Embed #1: Title="🟢 BUY — GOOGL 345C · Sep 28" Description="Entered **GOOGL Sep28 '26 345 Call**
+[Open Live Dashboard →](https://swiftoptions.pro/desk)"
+   │      Field: Entry = `$2.255`
+   │      Field: Contracts = `15`
+   │      Field: Cost = `$3,382`
+   │      Field: Trim Targets = ```
+25%   $2.819
+50%   $3.383
+75%   $3.946
+100%  $4.510
+```
+   │      Field: News backdrop = 🟢 Tech leaning **up** — 11 up / 6 down in the last 6h

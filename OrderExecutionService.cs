@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Net.Sockets;
 using System.Threading;
 using IBApi; 
 
@@ -20,14 +21,22 @@ namespace OptionTradesParser
         // The quote is advisory only, so it must never delay a time-sensitive confirmation prompt for long.
         private static readonly TimeSpan QuoteTimeout = TimeSpan.FromSeconds(3);
 
+        private static readonly TimeSpan DashboardProbeTimeout = TimeSpan.FromMilliseconds(300);
+        private static readonly TimeSpan OrderStatusRefreshInterval = TimeSpan.FromSeconds(15);
+        private const string DashboardUiHost = "127.0.0.1";
+        private const int DashboardUiPort = 5173;
+
         private readonly EClientSocket _clientSocket;
         private readonly EReaderSignal _readerSignal;
         private readonly string _host;
         private readonly int _port;
         private int _currentOrderId = 0;
-        private readonly int _clientId; // 🔥 Tracker handle
+        private int _clientId; // 🔥 Tracker handle
+        private readonly int _clientIdMin;
+        private readonly int _clientIdMax;
         private readonly IReadOnlyList<double> _orderBudgets;
         private readonly string _accountType;
+        private readonly TimeSpan _browserApprovalTimeout;
         private int _reconnectLoopActive;
         private DatabaseService? _dbService;
         private ulong _activeDiscordMessageId = 0;
@@ -38,7 +47,18 @@ namespace OptionTradesParser
         private readonly QuoteBook _quotes = new();
         private readonly ConcurrentDictionary<int, PendingEntryOrder> _pendingEntryOrders = new();
         private readonly ConcurrentDictionary<int, ActiveTakeProfitOrder> _activeTakeProfitOrders = new();
+        private readonly ConcurrentDictionary<int, ulong> _orderMessageIds = new();
+        private readonly ConcurrentDictionary<int, decimal> _executionFilledQuantities = new();
+        private readonly ConcurrentDictionary<string, decimal> _latestOptionPositions = new();
+        private readonly ConcurrentDictionary<int, DatabaseService.ManualExitPriceCandidate> _manualExitExecutionRequests = new();
+        private readonly ConcurrentDictionary<string, DatabaseService.ManualExitPriceCandidate> _manualExitPriceLookups = new();
+        private readonly CancellationTokenSource _shutdown = new();
+        private int _orderStatusMonitorStarted;
+        private int _statusRequestId = 900000;
+        private int _plannedDisconnect;
         private Thread? _readerThread;
+
+        public bool IsReady => _clientSocket.IsConnected() && _orderIdReady.IsSet;
 
         // Serializes the console confirmation prompt so concurrent alerts cannot steal each other's keystrokes.
         private readonly object _promptGate = new();
@@ -78,29 +98,61 @@ namespace OptionTradesParser
 
         private sealed record ResolvedContract(Contract Contract, IReadOnlyList<PriceIncrementRule> PriceRules);
 
-        public OrderExecutionService(string host, int port, int clientId, IReadOnlyList<double> orderBudgets, string accountType)
+        public OrderExecutionService(string host, int port, int clientId, int clientIdMin, int clientIdMax, IReadOnlyList<double> orderBudgets, string accountType, TimeSpan browserApprovalTimeout)
         {
             _readerSignal = new EReaderMonitorSignal();
             _clientSocket = new EClientSocket(this, _readerSignal);
             _host = host;
             _port = port;
             _clientId = clientId;
+            _clientIdMin = clientIdMin;
+            _clientIdMax = clientIdMax;
             _orderBudgets = orderBudgets;
             _accountType = string.IsNullOrWhiteSpace(accountType) ? "PAPER" : accountType.Trim().ToUpperInvariant();
+            _browserApprovalTimeout = browserApprovalTimeout;
 
-            // "Connection refused" at startup usually means TWS hasn't finished its own boot/login yet
-            // (this is routine right after TWS's nightly restart), so the first attempt gets retried too.
-            if (!Connect() && Interlocked.CompareExchange(ref _reconnectLoopActive, 1, 0) == 0)
+            ConnectAndWaitForHandshake("initial connection");
+        }
+
+        public async System.Threading.Tasks.Task<bool> WaitUntilReadyAsync()
+        {
+            if (IsReady) return true;
+            if (Interlocked.CompareExchange(ref _reconnectLoopActive, 1, 0) != 0) return false;
+
+            return await ReconnectAsync();
+        }
+
+        private bool ConnectAndWaitForHandshake(string attemptDescription)
+        {
+            bool socketOpened = Connect();
+            if (!socketOpened) return false;
+
+            if (_orderIdReady.Wait(BrokerReplyTimeout) && _clientSocket.IsConnected())
             {
-                _ = ReconnectAsync();
+                // Falls back to delayed quotes when the account has no live option data subscription.
+                _clientSocket.reqMarketDataType(4);
+                StartOrderStatusMonitor();
+                return true;
             }
+
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"❌ [IBKR] {attemptDescription} opened a socket but did not receive nextValidId within {BrokerReplyTimeout.TotalSeconds:0}s.");
+            Console.ResetColor();
+
+            if (_clientSocket.IsConnected()) _clientSocket.eDisconnect();
+            return false;
         }
 
         private bool Connect()
         {
             // TWS can force-close a socket that still looks "connected" to this client; disconnecting first
             // guarantees a clean slate instead of retrying eConnect against stale internal state.
-            if (_clientSocket.IsConnected()) _clientSocket.eDisconnect();
+            if (_clientSocket.IsConnected())
+            {
+                Interlocked.Exchange(ref _plannedDisconnect, 1);
+                _clientSocket.eDisconnect();
+                Interlocked.Exchange(ref _plannedDisconnect, 0);
+            }
 
             // Two reader threads racing on the same shared signal (old + new generation) can desync the
             // protocol stream and looks exactly like TWS forcibly resetting the connection. Only one may run.
@@ -110,12 +162,12 @@ namespace OptionTradesParser
             }
 
             _orderIdReady.Reset();
-            Console.WriteLine($"🔌 [IBKR] Connecting to TWS Gateway at {_host}:{_port}...");
+            Console.WriteLine($"🔌 [IBKR] Connecting to TWS Gateway at {_host}:{_port} with ClientId {_clientId}...");
             _clientSocket.eConnect(_host, _port, _clientId);
 
             if (_clientSocket.IsConnected())
             {
-                Console.WriteLine("USA ✅ [IBKR] Successfully linked to active trading session socket.");
+                Console.WriteLine("🔌 [IBKR] Socket opened; awaiting nextValidId handshake...");
 
                 var reader = new EReader(_clientSocket, _readerSignal);
                 reader.Start();
@@ -128,8 +180,6 @@ namespace OptionTradesParser
                 _readerThread = thread;
                 thread.Start();
 
-                // Falls back to delayed quotes when the account has no live option data subscription.
-                _clientSocket.reqMarketDataType(4);
                 return true;
             }
 
@@ -148,14 +198,80 @@ namespace OptionTradesParser
         /// ghost session that can count against TWS's connected-client limit and cause future connects to reset.
         public void Disconnect()
         {
+            _shutdown.Cancel();
+            Interlocked.Exchange(ref _plannedDisconnect, 1);
             if (_clientSocket.IsConnected()) _clientSocket.eDisconnect();
+            if (_readerThread is { IsAlive: true } reader && !reader.Join(TimeSpan.FromSeconds(2)))
+            {
+                Console.WriteLine("⚠️ [IBKR] Reader thread did not exit within 2s during shutdown.");
+            }
+        }
+
+        private void StartOrderStatusMonitor()
+        {
+            if (Interlocked.CompareExchange(ref _orderStatusMonitorStarted, 1, 0) != 0) return;
+
+            var thread = new Thread(MonitorOrderStatuses) { IsBackground = true };
+            thread.Start();
+        }
+
+        private void MonitorOrderStatuses()
+        {
+            while (!_shutdown.IsCancellationRequested)
+            {
+                try
+                {
+                    if (_clientSocket.IsConnected() && _orderIdReady.IsSet)
+                    {
+                        int executionRequestId = Interlocked.Increment(ref _statusRequestId);
+                        ReconciliationLog.Write($"[IBKR STATUS SYNC] Requesting open/completed orders, executions reqId {executionRequestId}, and positions...");
+                        _clientSocket.reqAllOpenOrders();
+                        _clientSocket.reqCompletedOrders(apiOnly: false);
+                        _clientSocket.reqExecutions(executionRequestId, new ExecutionFilter());
+                        _latestOptionPositions.Clear();
+                        _clientSocket.reqPositions();
+                        RequestMissingManualExitPrices();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ReconciliationLog.Write($"[IBKR STATUS SYNC] Refresh failed ({ex.GetType().Name}: {ex.Message}).");
+                }
+
+                _shutdown.Token.WaitHandle.WaitOne(OrderStatusRefreshInterval);
+            }
+        }
+
+        private void RequestMissingManualExitPrices()
+        {
+            IReadOnlyList<DatabaseService.ManualExitPriceCandidate> candidates = _dbService?.GetManualExitsMissingPrice()
+                ?? Array.Empty<DatabaseService.ManualExitPriceCandidate>();
+            if (candidates.Count == 0) return;
+
+            ReconciliationLog.Write($"[MANUAL EXIT RECON] {candidates.Count} manual exit(s) missing price. Requesting contract-level IBKR executions...");
+            foreach (DatabaseService.ManualExitPriceCandidate candidate in candidates)
+            {
+                string contractKey = DatabaseService.FormatOptionPositionKey(candidate.Ticker, candidate.OptionType, candidate.Strike, candidate.Expiration);
+                _manualExitPriceLookups[contractKey] = candidate;
+
+                int reqId = Interlocked.Increment(ref _statusRequestId);
+                _manualExitExecutionRequests[reqId] = candidate;
+                var filter = new ExecutionFilter
+                {
+                    Symbol = candidate.Ticker,
+                    SecType = "OPT"
+                };
+
+                ReconciliationLog.Write($"[MANUAL EXIT RECON] reqId {reqId}: looking for SELL execution matching {candidate.Ticker} {candidate.Expiration} {candidate.Strike}{(candidate.OptionType == "CALL" ? "C" : "P")} qty {candidate.Quantity}.");
+                _clientSocket.reqExecutions(reqId, filter);
+            }
         }
 
         public override void nextValidId(int orderId)
         {
             _currentOrderId = orderId;
             _orderIdReady.Set();
-            Console.WriteLine($"🔄 [IBKR SYNC] Order ID baseline synchronized dynamically with broker servers. Next ID: #{_currentOrderId}");
+            Console.WriteLine($"✅ [IBKR READY] Trading session synchronized. ClientId {_clientId}; next order ID #{_currentOrderId}.");
         }
 
         public override void managedAccounts(string accountsList)
@@ -168,13 +284,22 @@ namespace OptionTradesParser
             // 2104/2106/2107/2158/2119 are data-farm status notices, not failures.
             bool informational = errorCode is 2104 or 2106 or 2107 or 2158 or 2119;
 
-            Console.ForegroundColor = informational ? ConsoleColor.DarkGray : ConsoleColor.Red;
-            Console.WriteLine($"{(informational ? "i" : "X")} [IBKR {(informational ? "INFO" : "ERROR")}] id={id} code={errorCode} :: {errorMsg}");
-            if (!string.IsNullOrWhiteSpace(advancedOrderRejectJson))
+            string errorLine = $"{(informational ? "i" : "X")} [IBKR {(informational ? "INFO" : "ERROR")}] id={id} code={errorCode} :: {errorMsg}";
+            if (informational || errorCode is 202)
             {
-                Console.WriteLine($"   └── Reject detail: {advancedOrderRejectJson}");
+                ReconciliationLog.Write(errorLine);
+                if (!string.IsNullOrWhiteSpace(advancedOrderRejectJson)) ReconciliationLog.Write($"   └── Reject detail: {advancedOrderRejectJson}");
             }
-            Console.ResetColor();
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine(errorLine);
+                if (!string.IsNullOrWhiteSpace(advancedOrderRejectJson))
+                {
+                    Console.WriteLine($"   └── Reject detail: {advancedOrderRejectJson}");
+                }
+                Console.ResetColor();
+            }
 
             if (!informational)
             {
@@ -215,21 +340,210 @@ namespace OptionTradesParser
             }
         }
 
-        public override void error(string str) => Console.WriteLine($"X [IBKR ERROR] {str}");
+        public override void error(string str) => ReconciliationLog.Write($"X [IBKR ERROR] {str}");
 
-        public override void error(Exception e) => Console.WriteLine($"X [IBKR EXCEPTION] {e.Message}");
+        public override void error(Exception e) => ReconciliationLog.Write($"X [IBKR EXCEPTION] {e.Message}");
 
         private static bool IsOrderRejection(int errorCode, string advancedOrderRejectJson)
             => errorCode is 110 or 201 or 399 or 463 || !string.IsNullOrWhiteSpace(advancedOrderRejectJson);
 
         public override void openOrder(int orderId, Contract contract, Order order, OrderState orderState)
         {
-            Console.WriteLine($"📗 [IBKR ACK] Order #{orderId} {order.Action} {order.TotalQuantity} {contract.LocalSymbol ?? contract.Symbol} :: state={orderState.Status}");
+            bool tracked = UpdateTrackedOrderStatus(orderId, order.ClientId, orderState.Status, "OPEN_ORDER_SNAPSHOT");
+            if (tracked)
+            {
+                ReconciliationLog.Write($"[IBKR ACK] Order #{orderId} {order.Action} {order.TotalQuantity} {contract.LocalSymbol ?? contract.Symbol} :: state={orderState.Status}");
+            }
+        }
+
+        public override void completedOrder(Contract contract, Order order, OrderState orderState)
+        {
+            if (UpdateTrackedOrderStatus(order.OrderId, order.ClientId, orderState.Status, "COMPLETED_ORDER_SNAPSHOT"))
+            {
+                string symbol = contract.LocalSymbol ?? contract.Symbol ?? "UNKNOWN";
+                ReconciliationLog.Write($"[IBKR COMPLETED] Order #{order.OrderId} {order.Action} {order.TotalQuantity} {symbol} :: state={orderState.Status}");
+            }
+        }
+
+        public override void execDetails(int reqId, Contract contract, Execution execution)
+        {
+            if (_manualExitExecutionRequests.TryGetValue(reqId, out DatabaseService.ManualExitPriceCandidate? lookup))
+            {
+                ReconciliationLog.Write($"[MANUAL EXIT RECON] reqId {reqId}: received execution {execution.ExecId} order #{execution.OrderId} {execution.Side} {execution.Shares} @ ${execution.Price:F2} for {contract.Symbol} {contract.LastTradeDateOrContractMonth} {contract.Strike}{contract.Right}.");
+                if (IsManualExitMatch(lookup, contract, execution))
+                {
+                    ImportExternalExecution(contract, execution);
+                    return;
+                }
+            }
+
+            string executionAction = execution.Side.Equals("BOT", StringComparison.OrdinalIgnoreCase) ? "BUY" : "SELL";
+            if (executionAction == "SELL" && TryGetManualExitLookup(contract, out _))
+            {
+                ImportExternalExecution(contract, execution);
+                return;
+            }
+
+            DatabaseService.TrackedOrderContext? trackedOrder = _dbService?.FindTrackedOrder(execution.OrderId, execution.ClientId);
+            if (!_orderMessageIds.TryGetValue(execution.OrderId, out ulong messageId))
+            {
+                if (trackedOrder == null)
+                {
+                    ImportExternalExecution(contract, execution);
+                    return;
+                }
+                messageId = trackedOrder.DiscordMessageId;
+                _orderMessageIds[execution.OrderId] = messageId;
+            }
+
+            DateTimeOffset executedAt = ParseBrokerExecutionTime(execution.Time);
+            bool newlyLogged = _dbService?.LogExecution(execution.ExecId, execution.OrderId, execution.ClientId, messageId,
+                executionAction, execution.Shares, execution.Price, executedAt) == true;
+
+            if (!newlyLogged || executionAction != "BUY") return;
+
+            PendingEntryOrder? entry = GetOrRestorePendingEntry(execution.OrderId, contract, trackedOrder);
+            if (entry == null) return;
+
+            decimal filled = _executionFilledQuantities.AddOrUpdate(
+                execution.OrderId,
+                execution.Shares,
+                (_, existing) => Math.Min(entry.Quantity, existing + execution.Shares));
+            UpdateTrackedOrderStatus(execution.OrderId, execution.ClientId,
+                filled >= entry.Quantity ? "FILLED" : "PARTIALLY_FILLED", "EXECUTION_CALLBACK");
+            ReconcileTakeProfitOrders(execution.OrderId, entry, (int)filled, execution.Price);
+        }
+
+        private static bool IsManualExitMatch(DatabaseService.ManualExitPriceCandidate lookup, Contract contract, Execution execution)
+        {
+            if (!execution.Side.Equals("SLD", StringComparison.OrdinalIgnoreCase)) return false;
+            if (!string.Equals(contract.Symbol, lookup.Ticker, StringComparison.OrdinalIgnoreCase)) return false;
+            if (!string.Equals(contract.LastTradeDateOrContractMonth, lookup.Expiration, StringComparison.OrdinalIgnoreCase)) return false;
+            if (Math.Abs(contract.Strike - lookup.Strike) > 0.0001) return false;
+
+            string optionType = contract.Right?.Equals("P", StringComparison.OrdinalIgnoreCase) == true ? "PUT" : "CALL";
+            return string.Equals(optionType, lookup.OptionType, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private bool TryGetManualExitLookup(Contract contract, out DatabaseService.ManualExitPriceCandidate? lookup)
+        {
+            lookup = null;
+            if (string.IsNullOrWhiteSpace(contract.Symbol) || string.IsNullOrWhiteSpace(contract.LastTradeDateOrContractMonth) || contract.Strike <= 0)
+            {
+                return false;
+            }
+
+            string optionType = contract.Right?.Equals("P", StringComparison.OrdinalIgnoreCase) == true ? "PUT" : "CALL";
+            string key = DatabaseService.FormatOptionPositionKey(contract.Symbol, optionType, contract.Strike, contract.LastTradeDateOrContractMonth);
+            return _manualExitPriceLookups.TryGetValue(key, out lookup);
+        }
+
+        private void ImportExternalExecution(Contract contract, Execution execution)
+        {
+            string action = execution.Side.Equals("BOT", StringComparison.OrdinalIgnoreCase) ? "BUY" : "SELL";
+            if (action != "SELL") return;
+
+            string ticker = contract.Symbol?.Trim().ToUpperInvariant() ?? string.Empty;
+            string optionType = contract.Right?.Equals("P", StringComparison.OrdinalIgnoreCase) == true ? "PUT" : "CALL";
+            string expiration = contract.LastTradeDateOrContractMonth?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(ticker) || string.IsNullOrWhiteSpace(expiration) || contract.Strike <= 0)
+            {
+                ReconciliationLog.Write($"[OMS STATUS SYNC] Ignored external SELL execution {execution.ExecId}: missing option contract identity.");
+                return;
+            }
+
+            DateTimeOffset executedAt = ParseBrokerExecutionTime(execution.Time);
+            if (_dbService?.TryImportExternalSellExecution(execution.ExecId, execution.OrderId, execution.ClientId,
+                ticker, optionType, contract.Strike, expiration, execution.Shares, execution.Price, executedAt) == true)
+            {
+                ReconciliationLog.Write($"[OMS STATUS SYNC] Imported/backfilled manual TWS close for {ticker} {expiration} {contract.Strike}{contract.Right}: SELL {execution.Shares} @ ${execution.Price:F2}.");
+            }
+            else
+            {
+                ReconciliationLog.Write($"[OMS STATUS SYNC] External SELL execution {execution.ExecId} for {ticker} {expiration} {contract.Strike}{contract.Right} @ ${execution.Price:F2} did not match an open trade or missing-price manual exit.");
+            }
+        }
+
+        public override void execDetailsEnd(int reqId)
+        {
+            if (_manualExitExecutionRequests.TryRemove(reqId, out DatabaseService.ManualExitPriceCandidate? lookup))
+            {
+                ReconciliationLog.Write($"[MANUAL EXIT RECON] reqId {reqId}: completed execution search for {lookup.Ticker} {lookup.Expiration} {lookup.Strike}{(lookup.OptionType == "CALL" ? "C" : "P")}.");
+            }
+        }
+
+        private static DateTimeOffset ParseBrokerExecutionTime(string value)
+        {
+            if (DateTimeOffset.TryParse(value, out DateTimeOffset parsed)) return parsed;
+
+            string[] parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 3
+                && DateTime.TryParseExact($"{parts[0]} {parts[1]}", "yyyyMMdd HH:mm:ss", null,
+                    System.Globalization.DateTimeStyles.None, out DateTime localTime))
+            {
+                string zoneId = parts[2] switch
+                {
+                    "US/Eastern" => "Eastern Standard Time",
+                    "US/Central" => "Central Standard Time",
+                    "US/Mountain" => "Mountain Standard Time",
+                    "US/Pacific" => "Pacific Standard Time",
+                    _ => TimeZoneInfo.Local.Id
+                };
+
+                try
+                {
+                    TimeZoneInfo zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+                    return new DateTimeOffset(localTime, zone.GetUtcOffset(localTime)).ToUniversalTime();
+                }
+                catch (TimeZoneNotFoundException)
+                {
+                    return new DateTimeOffset(localTime, TimeZoneInfo.Local.GetUtcOffset(localTime)).ToUniversalTime();
+                }
+            }
+
+            return DateTimeOffset.UtcNow;
+        }
+
+        private PendingEntryOrder? GetOrRestorePendingEntry(int orderId, Contract contract, DatabaseService.TrackedOrderContext? trackedOrder)
+        {
+            if (_pendingEntryOrders.TryGetValue(orderId, out PendingEntryOrder? entry)) return entry;
+
+            trackedOrder ??= _dbService?.FindTrackedOrder(orderId, _clientId);
+            if (trackedOrder == null || !trackedOrder.OrderRole.Equals("ENTRY", StringComparison.OrdinalIgnoreCase)) return null;
+            if (!trackedOrder.ActionType.Equals("BUY", StringComparison.OrdinalIgnoreCase)) return null;
+
+            var trade = new ParsedTrade(
+                trackedOrder.TraderName,
+                trackedOrder.ActionType,
+                trackedOrder.Ticker,
+                trackedOrder.OptionType,
+                trackedOrder.Strike,
+                trackedOrder.Expiration,
+                trackedOrder.EntryPrice,
+                trackedOrder.RiskCategory,
+                TrimFraction: 1,
+                SizingAmbiguous: false,
+                ContractInferred: false);
+
+            entry = new PendingEntryOrder(contract, trade, trackedOrder.Quantity, trackedOrder.DiscordMessageId,
+                new[] { new PriceIncrementRule(0, 0.01) });
+            _pendingEntryOrders[orderId] = entry;
+            return entry;
+        }
+
+        public override void commissionAndFeesReport(CommissionAndFeesReport report)
+        {
+            _dbService?.UpdateExecutionCommission(report.ExecId, report.CommissionAndFees, report.RealizedPNL);
         }
 
         public override void connectionClosed()
         {
             Console.WriteLine("🔌 [IBKR] Socket connection closed by TWS.");
+
+            if (Volatile.Read(ref _plannedDisconnect) == 1 || _shutdown.IsCancellationRequested)
+            {
+                return;
+            }
 
             if (Interlocked.CompareExchange(ref _reconnectLoopActive, 1, 0) == 0)
             {
@@ -237,7 +551,7 @@ namespace OptionTradesParser
             }
         }
 
-        private async System.Threading.Tasks.Task ReconnectAsync()
+        private async System.Threading.Tasks.Task<bool> ReconnectAsync()
         {
             int maxAttempts = ReconnectDelays.Length;
             try
@@ -248,12 +562,12 @@ namespace OptionTradesParser
                     Console.WriteLine($"🔄 [IBKR] Reconnect attempt {attempt}/{maxAttempts} starts in {delay.TotalSeconds:0}s.");
                     await System.Threading.Tasks.Task.Delay(delay);
 
-                    bool socketOpened = Connect();
-                    bool handshakeCompleted = socketOpened && _orderIdReady.Wait(BrokerReplyTimeout);
-                    if (handshakeCompleted && _clientSocket.IsConnected())
+                    RotateClientId();
+
+                    if (ConnectAndWaitForHandshake($"Reconnect attempt {attempt}/{maxAttempts}"))
                     {
                         Console.WriteLine($"✅ [IBKR] Reconnected on attempt {attempt}/{maxAttempts}.");
-                        return;
+                        return true;
                     }
 
                     Console.WriteLine($"❌ [IBKR] Reconnect attempt {attempt}/{maxAttempts} did not complete the broker handshake.");
@@ -261,11 +575,23 @@ namespace OptionTradesParser
 
                 Console.WriteLine($"❌ [IBKR] Reconnect stopped after {maxAttempts} unsuccessful attempts. If TWS just restarted, open");
                 Console.WriteLine("   Global Configuration → API → Settings and click Apply once, then restart this app.");
+                return false;
             }
             finally
             {
                 Interlocked.Exchange(ref _reconnectLoopActive, 0);
             }
+        }
+
+        private void RotateClientId()
+        {
+            if (_clientIdMin <= 0 || _clientIdMax < _clientIdMin) return;
+
+            int nextClientId = _clientId >= _clientIdMax ? _clientIdMin : _clientId + 1;
+            if (nextClientId == _clientId) return;
+
+            Console.WriteLine($"🔄 [IBKR] Rotating ClientId {_clientId} -> {nextClientId} for reconnect attempt.");
+            _clientId = nextClientId;
         }
 
         public override void contractDetails(int reqId, ContractDetails contractDetails)
@@ -286,11 +612,30 @@ namespace OptionTradesParser
         public override void position(string account, Contract contract, decimal pos, double avgCost)
         {
             _positions.Record(contract.ConId, pos);
+
+            if (contract.SecType?.Equals("OPT", StringComparison.OrdinalIgnoreCase) == true
+                && !string.IsNullOrWhiteSpace(contract.Symbol)
+                && !string.IsNullOrWhiteSpace(contract.LastTradeDateOrContractMonth)
+                && contract.Strike > 0)
+            {
+                string optionType = contract.Right?.Equals("P", StringComparison.OrdinalIgnoreCase) == true ? "PUT" : "CALL";
+                string key = DatabaseService.FormatOptionPositionKey(contract.Symbol, optionType, contract.Strike, contract.LastTradeDateOrContractMonth);
+                _latestOptionPositions[key] = pos;
+            }
         }
 
         public override void positionEnd()
         {
             _positions.CompleteSnapshot();
+            int closed = _dbService?.ReconcileClosedPositions(_latestOptionPositions) ?? 0;
+            if (closed > 0)
+            {
+                ReconciliationLog.Write($"[OMS POSITION SYNC] Marked {closed} trade(s) closed from IBKR position snapshot.");
+            }
+            else
+            {
+                ReconciliationLog.Write($"[OMS POSITION SYNC] Position snapshot received; no additional tracked trades needed closure.");
+            }
         }
 
         public override void tickPrice(int tickerId, int field, double price, TickAttrib attribs)
@@ -312,12 +657,13 @@ namespace OptionTradesParser
         {
             bool isFilled = status.Equals("Filled", StringComparison.OrdinalIgnoreCase);
             bool isTerminal = isFilled || status is "Cancelled" or "ApiCancelled" or "Inactive";
+            string normalizedStatus = NormalizeBrokerOrderStatus(status, filled, remaining);
 
-            Console.ForegroundColor = isFilled ? ConsoleColor.Green : isTerminal ? ConsoleColor.Red : ConsoleColor.DarkGray;
-            Console.WriteLine($"📊 [IBKR STATUS] Order #{orderId} :: {status} | filled {filled} | remaining {remaining}"
+            ReconciliationLog.Write($"[IBKR STATUS] Order #{orderId} :: {status} | filled {filled} | remaining {remaining}"
                 + (avgFillPrice > 0 ? $" | avg ${avgFillPrice}" : string.Empty)
                 + (string.IsNullOrWhiteSpace(whyHeld) ? string.Empty : $" | held: {whyHeld}"));
-            Console.ResetColor();
+
+            UpdateTrackedOrderStatus(orderId, clientId, normalizedStatus, "ORDER_STATUS_CALLBACK");
 
             if (_activeTakeProfitOrders.TryGetValue(orderId, out ActiveTakeProfitOrder? activeTarget)
                 && _pendingEntryOrders.TryGetValue(activeTarget.ParentEntryOrderId, out PendingEntryOrder? targetEntry))
@@ -338,7 +684,6 @@ namespace OptionTradesParser
 
             if (isTerminal)
             {
-                _dbService?.UpdateOrderStatus(orderId, clientId, status.ToUpperInvariant());
                 if (_activeTakeProfitOrders.TryRemove(orderId, out ActiveTakeProfitOrder? target))
                 {
                     target.Completed.Set();
@@ -353,6 +698,40 @@ namespace OptionTradesParser
             {
                 _pendingEntryOrders.TryRemove(orderId, out _);
             }
+        }
+
+        private bool UpdateTrackedOrderStatus(int orderId, int brokerClientId, string? status, string source)
+        {
+            if (string.IsNullOrWhiteSpace(status)) return false;
+
+            int effectiveClientId = brokerClientId > 0 ? brokerClientId : _clientId;
+            string normalizedStatus = NormalizeBrokerOrderStatus(status, filled: 0, remaining: 0);
+            if (_dbService?.UpdateKnownOrderStatus(orderId, effectiveClientId, normalizedStatus) == true)
+            {
+                ReconciliationLog.Write($"[OMS STATUS SYNC] {source}: order #{orderId} -> {normalizedStatus}");
+                return true;
+            }
+
+            return false;
+        }
+
+        private static string NormalizeBrokerOrderStatus(string status, decimal filled, decimal remaining)
+        {
+            if (filled > 0 && remaining > 0) return "PARTIALLY_FILLED";
+
+            return status.Trim().ToUpperInvariant() switch
+            {
+                "PRESUBMITTED" => "PRESUBMITTED",
+                "PRE-SUBMITTED" => "PRESUBMITTED",
+                "SUBMITTED" => "SUBMITTED",
+                "PENDINGSUBMIT" => "PENDING_SUBMIT",
+                "PENDINGCANCEL" => "PENDING_CANCEL",
+                "APICANCELLED" => "API_CANCELLED",
+                "CANCELLED" => "CANCELLED",
+                "FILLED" => "FILLED",
+                "INACTIVE" => "INACTIVE",
+                var value => value.Replace(" ", "_")
+            };
         }
 
         public void ProcessIncomingAlert(ulong discordMsgId, ParsedTrade trade)
@@ -482,7 +861,7 @@ namespace OptionTradesParser
                 Console.ResetColor();
             }
 
-            Console.WriteLine("⏳ Awaiting confirmation in the pop-up dialog...");
+            Console.WriteLine($"⏳ Awaiting dashboard approval for {_browserApprovalTimeout.TotalSeconds:0}s. Desktop dialog remains available as fallback...");
 
             var warnings = new System.Collections.Generic.List<string>();
             if (sizingWarning != null) warnings.Add(sizingWarning);
@@ -510,7 +889,7 @@ namespace OptionTradesParser
                 BudgetOptions = budgetOptions
             };
 
-            TradeConfirmationResult confirmation = ConfirmationDialog.Confirm(details);
+            TradeConfirmationResult confirmation = RequestConfirmation(discordMsgId, ticker, details);
 
             if (confirmation.Approved)
             {
@@ -558,7 +937,76 @@ namespace OptionTradesParser
                 Console.WriteLine("🛡️ [ORDER BYPASSED] Pre-trade gate dropped manually. No capital deployed.\n");
                 Console.ResetColor();
 
-                _dbService?.LogAudit(discordMsgId, ticker, "PRE_TRADE_GATEWAY", "USER_DECLINED", "User selected No in the pre-trade dialog.");
+                _dbService?.LogAudit(discordMsgId, ticker, "PRE_TRADE_GATEWAY", "USER_DECLINED", "User declined the pre-trade confirmation.");
+            }
+        }
+
+        private TradeConfirmationResult RequestConfirmation(ulong discordMsgId, string ticker, TradeConfirmationDetails details)
+        {
+            if (_dbService == null) return ConfirmationDialog.Confirm(details);
+
+            try
+            {
+                _dbService.CreatePendingApproval(discordMsgId, details);
+
+                if (!IsDashboardUiListening())
+                {
+                    _dbService.LogAudit(discordMsgId, ticker, "PRE_TRADE_GATEWAY", "DASHBOARD_OFFLINE",
+                        $"React dashboard was not listening on {DashboardUiHost}:{DashboardUiPort}; opening desktop confirmation immediately.");
+                    Console.WriteLine("🖥️ [DIALOG FALLBACK] React dashboard is not running. Opening desktop confirmation immediately.");
+                    return ConfirmationDialog.Confirm(details);
+                }
+
+                _dbService.LogAudit(discordMsgId, ticker, "PRE_TRADE_GATEWAY", "PENDING_BROWSER",
+                    $"Waiting up to {_browserApprovalTimeout.TotalSeconds:0}s for dashboard approval.");
+
+                BrowserApprovalDecision decision = _dbService.WaitForBrowserApproval(discordMsgId, _browserApprovalTimeout);
+                if (decision.Status == "APPROVED")
+                {
+                    TradeBudgetOption? selectedBudget = decision.SelectedBudget.HasValue
+                        ? details.BudgetOptions.FirstOrDefault(option => Math.Abs(option.Budget - decision.SelectedBudget.Value) < 0.001)
+                        : null;
+                    if (details.BudgetOptions.Count == 0 || selectedBudget != null)
+                    {
+                        Console.WriteLine("✅ [DASHBOARD APPROVAL] Order approved from React dashboard.");
+                        return new TradeConfirmationResult(true, selectedBudget);
+                    }
+
+                    Console.WriteLine("⚠️ [DASHBOARD APPROVAL] Dashboard returned an invalid budget. Opening fallback dialog.");
+                }
+                else if (decision.Status == "REJECTED")
+                {
+                    Console.WriteLine("🛡️ [DASHBOARD REJECTION] Order rejected from React dashboard.");
+                    return new TradeConfirmationResult(false, null);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ [DASHBOARD FALLBACK] Browser approval failed ({ex.GetType().Name}: {ex.Message}).");
+            }
+
+            Console.WriteLine("🖥️ [DIALOG FALLBACK] Browser approval timed out or was unavailable. Opening desktop confirmation.");
+            return ConfirmationDialog.Confirm(details);
+        }
+
+        private static bool IsDashboardUiListening()
+        {
+            try
+            {
+                using var client = new TcpClient();
+                IAsyncResult pendingConnection = client.BeginConnect(DashboardUiHost, DashboardUiPort, null, null);
+                if (!pendingConnection.AsyncWaitHandle.WaitOne(DashboardProbeTimeout)) return false;
+
+                client.EndConnect(pendingConnection);
+                return true;
+            }
+            catch (SocketException)
+            {
+                return false;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
             }
         }
 
@@ -677,6 +1125,7 @@ namespace OptionTradesParser
             };
 
             int orderId = Interlocked.Increment(ref _currentOrderId) - 1;
+            _orderMessageIds[orderId] = _activeDiscordMessageId;
 
             if (orderAction == "BUY")
             {
@@ -734,6 +1183,7 @@ namespace OptionTradesParser
                         levelState.WorkingOrderFilled = 0;
                         _activeTakeProfitOrders[targetOrderId] = new ActiveTakeProfitOrder(
                             entry.Contract.ConId, parentOrderId, target.Level, new ManualResetEventSlim(false));
+                        _orderMessageIds[targetOrderId] = entry.DiscordMessageId;
                     }
 
                     levelState.SubmittedQuantity = requiredOrderQuantity;

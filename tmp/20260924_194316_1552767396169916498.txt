@@ -1,0 +1,6 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default (forwarded)
+   ├── Content:     (empty)
+   ├── Forwarded #1 Content: $SPCX $143P tomorrow at $.25 <@&1531936405561938033> 
+
+•  Gwynne Shotwell’s Form 144: She filed to sell 342,170 shares (~$52 million) under a prearranged Rule 10b5-1 plan. The approximate sale date listed was September 22, 2026 (she exercised options that day). Shares became eligible today (September 24, 2026). Once the lockup tranche unlocks, holders (early investors, employees, etc.) can sell into the open market right away. There is no delayed “settlement” period that postpones the potential supply—the shares are free to trade as of today. Markets are open now (it’s currently ~3:39 PM EDT on a Thursday; the regular session closes at 4:00 PM EDT). Any selling that occurs today will already be reflected in the live price and volume. As of recent quotes, SPCX is trading around $146.9–$147.5 (down roughly 0.5–1% from Wednesday’s close of $148.36).

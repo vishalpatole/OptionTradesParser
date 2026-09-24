@@ -24,6 +24,18 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="Dashboard.Api\**" />
+    <EmbeddedResource Remove="Dashboard.Api\**" />
+    <None Remove="Dashboard.Api\**" />
+    <Compile Remove="dashboard-ui\**" />
+    <EmbeddedResource Remove="dashboard-ui\**" />
+    <None Remove="dashboard-ui\**" />
+    <Compile Remove="IbkrConnectionProbe\**" />
+    <EmbeddedResource Remove="IbkrConnectionProbe\**" />
+    <None Remove="IbkrConnectionProbe\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Discord.Net" Version="3.20.1" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.0" />

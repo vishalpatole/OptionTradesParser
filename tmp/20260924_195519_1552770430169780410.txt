@@ -1,0 +1,21 @@
+📄 [RAW MESSAGE DUMP]
+   ├── Type:        Default
+   ├── Content:     SWIFT TRADES · LIVE DESK
+🟢 BUY — SPX 7700P · 0DTE
+Entered SPX Sep24 '26 7700 Put
+Open Live Dashboard →
+Entry
+$1.20
+Contracts
+15
+Cost
+$1,875
+Trim Targets
+25%   $1.563
+50%   $1.875
+75%   $2.188
+100%  $2.500
+News backdrop
+🔴 Broad Market leaning down — 1 up / 2 down in the last 6h
+Image
+Real trade · data via IBKR · Not financial advice•Today at 12:49 PM
